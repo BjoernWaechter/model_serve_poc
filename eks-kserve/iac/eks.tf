@@ -42,7 +42,11 @@ module "eks" {
   }
 
   # System node group — runs Knative, Istio, KServe controllers
-  # Scaled by AWS Cluster Autoscaler (not Karpenter) for predictable system component placement
+  # Scaled by AWS Cluster Autoscaler (not Karpenter) for predictable system component placement.
+  #
+  # Each node group is pinned to a dedicated subnet slice so node IPs are visible
+  # at a glance: system=10.0.1x.xx, cpu=10.0.2x.xx, gpu=10.0.3x.xx. The slice
+  # indices here must match the ordering in vpc.tf's private_subnets list.
   eks_managed_node_groups = {
     system = {
       name           = "system"
@@ -50,6 +54,7 @@ module "eks" {
       min_size       = var.system_node_min
       max_size       = var.system_node_max
       desired_size   = var.system_node_desired
+      subnet_ids     = slice(module.vpc.private_subnets, 0, 3) # 10.0.1x.xx
 
       labels = {
         role = "system"
@@ -87,6 +92,7 @@ module "eks" {
       min_size       = var.cpu_node_min
       max_size       = var.cpu_node_max
       desired_size   = var.cpu_node_desired
+      subnet_ids     = slice(module.vpc.private_subnets, 3, 6) # 10.0.2x.xx
 
       labels = {
         role               = "inference"
@@ -119,6 +125,7 @@ module "eks" {
       min_size       = var.gpu_node_min
       max_size       = var.gpu_node_max
       desired_size   = var.gpu_node_desired
+      subnet_ids     = slice(module.vpc.private_subnets, 6, 9) # 10.0.3x.xx
 
       ami_type = "AL2023_x86_64_NVIDIA" # Amazon Linux 2023 with NVIDIA drivers pre-installed
 

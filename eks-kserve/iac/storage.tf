@@ -59,7 +59,12 @@ resource "aws_security_group" "efs" {
 }
 
 resource "aws_efs_mount_target" "model_cache" {
-  count           = length(module.vpc.private_subnets)
+  # EFS allows exactly one mount target per AZ. The VPC module distributes
+  # private_subnets by index % len(azs), so the first len(azs) entries are
+  # guaranteed to be one-per-AZ. Nodes in later subnets (cpu_, gpu_ groups)
+  # reach EFS via intra-AZ VPC routing — the mount target just needs to exist
+  # in each AZ, not in every subnet.
+  count           = length(module.vpc.azs)
   file_system_id  = aws_efs_file_system.model_cache.id
   subnet_id       = module.vpc.private_subnets[count.index]
   security_groups = [aws_security_group.efs.id]
