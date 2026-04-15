@@ -22,6 +22,18 @@ variable "vpc_cidr" {
   default     = "10.0.0.0/16"
 }
 
+# -----------------------------------------------------------------------------
+# Public DNS — Route 53 hosted zone the cluster's external services live under.
+# All public subdomains (grafana, llm1, iris, …) are created as ALIAS records
+# pointing at the Istio NLB inside this zone. The domain name itself is
+# derived from the hosted zone via data.aws_route53_zone.main in route53.tf,
+# so only the zone ID needs to be supplied here.
+# -----------------------------------------------------------------------------
+variable "route53_zone_id" {
+  description = "Route 53 hosted zone ID for the public domain. Set in terraform.tfvars."
+  type        = string
+}
+
 variable "cpu_node_instance_type" {
   description = "Instance type for CPU inference node pool"
   type        = string

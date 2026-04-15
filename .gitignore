@@ -6,3 +6,8 @@ terraform.tfstate.backup
 __pycache__/
 *.pyc
 terraform.tfstate.*.backup
+mlflow/**
+
+# Terraform variable files — real values stay local, only the template is committed
+*.tfvars
+!*.tfvars.example

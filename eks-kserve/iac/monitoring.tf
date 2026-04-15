@@ -17,6 +17,9 @@ resource "helm_release" "kube_prometheus_stack" {
             value    = "true"
             effect   = "NoSchedule"
           }]
+        # Service stays ClusterIP — Grafana is reached via the Istio NLB on
+        # grafana.${local.public_domain}. No sub-path needed now that it has its
+        # own hostname.
         persistence = {
           enabled = true
           size    = "10Gi"
@@ -112,4 +115,62 @@ resource "helm_release" "kube_prometheus_stack" {
   ]
 
   depends_on = [module.eks]
+}
+
+# Expose Grafana through the existing Istio NLB at path /grafana.
+# Reuses the same `istio=ingress` pods that the Knative ingress and KServe
+# inference services already share, so no extra LoadBalancer/NLB is provisioned.
+#
+# Path-based routing instead of host-based avoids needing DNS — works directly
+# against the raw ELB hostname. If you wire Route 53 in later you can swap to
+# host-based by changing `hosts` and dropping the URI rewrite.
+resource "kubectl_manifest" "grafana_gateway" {
+  yaml_body = <<-YAML
+    apiVersion: networking.istio.io/v1beta1
+    kind: Gateway
+    metadata:
+      name: grafana-gateway
+      namespace: monitoring
+    spec:
+      selector:
+        istio: ingress
+      servers:
+        - hosts:
+            - "*"
+          port:
+            name: http
+            number: 80
+            protocol: HTTP
+  YAML
+
+  server_side_apply = true
+  force_conflicts   = true
+
+  depends_on = [helm_release.kube_prometheus_stack]
+}
+
+resource "kubectl_manifest" "grafana_virtualservice" {
+  yaml_body = <<-YAML
+    apiVersion: networking.istio.io/v1beta1
+    kind: VirtualService
+    metadata:
+      name: grafana
+      namespace: monitoring
+    spec:
+      hosts:
+        - "grafana.${local.public_domain}"
+      gateways:
+        - grafana-gateway
+      http:
+        - route:
+            - destination:
+                host: kube-prometheus-stack-grafana.monitoring.svc.cluster.local
+                port:
+                  number: 80
+  YAML
+
+  server_side_apply = true
+  force_conflicts   = true
+
+  depends_on = [kubectl_manifest.grafana_gateway]
 }

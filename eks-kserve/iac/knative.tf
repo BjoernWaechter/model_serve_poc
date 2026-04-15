@@ -94,9 +94,14 @@ resource "kubectl_manifest" "knative_istio" {
   ]
 }
 
-# Use the NLB hostname as the Knative domain so services are exposed externally.
-# Requests to <service>.<namespace>.<nlb-hostname> are routed by the ingress gateway.
-# For production, replace with a real domain and set up DNS / Route 53.
+# Public domain for Knative-served URLs. All ksvcs in this cluster are KServe
+# predictors, and KServe derives its top-level ISVC URL from the underlying
+# ksvc URL (stripping the -predictor suffix) — not from its own
+# inferenceservice-config.ingressDomain. So the `kserve.` subdomain has to
+# live on Knative's config-domain, not KServe's ingressDomain.
+#
+# If you later add non-KServe ksvcs that need the bare root domain, switch to
+# selector-based mapping (docs: https://knative.dev/docs/serving/using-a-custom-domain).
 resource "kubectl_manifest" "knative_config_domain" {
   yaml_body = <<-YAML
     apiVersion: v1
@@ -105,13 +110,31 @@ resource "kubectl_manifest" "knative_config_domain" {
       name: config-domain
       namespace: knative-serving
     data:
-      "${data.kubernetes_service.istio_ingress.status[0].load_balancer[0].ingress[0].hostname}": ""
+      "kserve.${local.public_domain}": ""
   YAML
 
   depends_on = [
     kubectl_manifest.knative_core,
     helm_release.istio_ingress,
   ]
+}
+
+# Drop the namespace from the Knative URL template so predictor ksvcs resolve
+# as <name>-predictor.<domain> instead of <name>-predictor.<namespace>.<domain>.
+# Must line up with the KServe ingress domainTemplate in kserve.tf.
+resource "kubernetes_config_map_v1_data" "knative_config_network" {
+  metadata {
+    name      = "config-network"
+    namespace = "knative-serving"
+  }
+
+  data = {
+    "domain-template" = "{{.Name}}.{{.Domain}}"
+  }
+
+  force = true
+
+  depends_on = [kubectl_manifest.knative_core]
 }
 
 data "kubernetes_service" "istio_ingress" {

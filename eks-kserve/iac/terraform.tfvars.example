@@ -1,0 +1,10 @@
+# Template for terraform.tfvars. Copy this file to terraform.tfvars and
+# fill in real values. terraform.tfvars is gitignored.
+#
+#   cp terraform.tfvars.example terraform.tfvars
+
+# Route 53 hosted zone ID for the public domain.
+# Find with: aws route53 list-hosted-zones --query 'HostedZones[].{Name:Name,Id:Id}'
+# The domain name itself is read from the zone at plan/apply time, so you
+# don't need to set it here.
+route53_zone_id = "ZXXXXXXXXXXXXX"

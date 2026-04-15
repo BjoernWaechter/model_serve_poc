@@ -27,6 +27,18 @@ data "kubectl_file_documents" "kserve" {
   content = data.http.kserve.response_body
 }
 
+locals {
+  # Resources we manage separately so we don't fight kubectl_manifest's
+  # force_conflicts = true on every apply. The inferenceservice-config
+  # ConfigMap gets a tailored `ingress` block below (domain, domainTemplate).
+  kserve_excluded = ["inferenceservice-config"]
+
+  kserve_filtered = {
+    for k, v in data.kubectl_file_documents.kserve.manifests : k => v
+    if !anytrue([for name in local.kserve_excluded : strcontains(v, "name: ${name}")])
+  }
+}
+
 # Pre-create the kserve namespace so namespaced resources in kserve.yaml
 # don't race against the Namespace document during parallel for_each apply.
 resource "kubectl_manifest" "kserve_ns" {
@@ -44,7 +56,7 @@ resource "kubectl_manifest" "kserve_ns" {
 }
 
 resource "kubectl_manifest" "kserve" {
-  for_each          = data.kubectl_file_documents.kserve.manifests
+  for_each          = local.kserve_filtered
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true
@@ -74,6 +86,79 @@ resource "kubectl_manifest" "kserve_cluster_resources" {
   depends_on = [
     kubectl_manifest.kserve,
   ]
+}
+
+locals {
+  # Pull the upstream inferenceservice-config CM out of the parsed kserve.yaml
+  # so we keep every default data key (storageInitializer, autoscaler, agent,
+  # explainers, …) that KServe ships with. We only need to override `ingress`.
+  # This stays correct across KServe version bumps: new keys come along for free.
+  kserve_isvc_upstream_cm = one([
+    for doc in data.kubectl_file_documents.kserve.manifests :
+    yamldecode(doc)
+    if try(yamldecode(doc).kind, "") == "ConfigMap" &&
+       try(yamldecode(doc).metadata.name, "") == "inferenceservice-config"
+  ])
+
+  kserve_isvc_ingress_config = jsonencode({
+    kserveIngressGateway       = "kserve/kserve-ingress-gateway"
+    ingressGateway             = "knative-serving/knative-ingress-gateway"
+    knativeLocalGatewayService = "knative-local-gateway.istio-system.svc.cluster.local"
+    localGateway               = "knative-serving/knative-local-gateway"
+    localGatewayService        = "knative-local-gateway.istio-system.svc.cluster.local"
+    ingressClassName           = "istio"
+    # All InferenceServices live under the kserve.* subdomain so the root
+    # domain stays clean and we can point a single wildcard DNS record and
+    # wildcard TLS cert at them. We put "kserve." inside the domain rather
+    # than the template — the domainTemplate only accepts simple patterns,
+    # embedding a literal middle label like "{{ .Name }}.kserve.{{ .IngressDomain }}"
+    # produces surprising output.
+    ingressDomain              = "kserve.${local.public_domain}"
+    domainTemplate             = "{{ .Name }}.{{ .IngressDomain }}"
+    urlScheme                  = "http"
+    disableIstioVirtualHost    = false
+    disableIngressCreation     = false
+    # Leave pathTemplate empty — we're doing domain-based routing. If set, KServe
+    # additionally tries to build a path URL and fails with "invalid URI" when
+    # the template lacks a leading slash (which the upstream default does).
+    pathTemplate               = ""
+  })
+}
+
+# KServe's inferenceservice-config ConfigMap. Built by merging our custom
+# `ingress` block onto the upstream defaults — so every other config key
+# (storageInitializer, autoscaler, …) keeps its default. The upstream copy
+# is filtered out via local.kserve_excluded above so this doesn't fight it.
+resource "kubectl_manifest" "kserve_inferenceservice_config" {
+  yaml_body = yamlencode(merge(
+    local.kserve_isvc_upstream_cm,
+    {
+      data = merge(
+        local.kserve_isvc_upstream_cm.data,
+        { ingress = local.kserve_isvc_ingress_config }
+      )
+    }
+  ))
+
+  server_side_apply = true
+  force_conflicts   = true
+
+  depends_on = [kubectl_manifest.kserve]
+}
+
+# KServe caches inferenceservice-config at controller startup and does not
+# hot-reload. Trigger a rollout restart whenever the CM contents change so the
+# new ingressDomain/domainTemplate values actually take effect.
+resource "null_resource" "kserve_controller_restart" {
+  triggers = {
+    config_hash = sha256(kubectl_manifest.kserve_inferenceservice_config.yaml_body)
+  }
+
+  provisioner "local-exec" {
+    command = "kubectl --context=$(kubectl config current-context) rollout restart deployment/kserve-controller-manager -n kserve && kubectl --context=$(kubectl config current-context) rollout status deployment/kserve-controller-manager -n kserve --timeout=120s"
+  }
+
+  depends_on = [kubectl_manifest.kserve_inferenceservice_config]
 }
 
 # Annotate KServe service account with IRSA role

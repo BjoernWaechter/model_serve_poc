@@ -20,7 +20,7 @@ resource "kubectl_manifest" "sklearn_iris_test" {
     apiVersion: "serving.kserve.io/v1beta1"
     kind: "InferenceService"
     metadata:
-      name: "sklearn-iris"
+      name: "iris"
       namespace: kserve-test
     spec:
       predictor:
@@ -86,7 +86,7 @@ resource "kubectl_manifest" "phi3_gpu_test" {
     apiVersion: serving.kserve.io/v1beta1
     kind: InferenceService
     metadata:
-      name: phi3-chat
+      name: llm1
       namespace: kserve-test
       annotations:
         # Allow up to ${floor(var.knative_progress_deadline / 60)} min for GPU node scale-up + driver init + image pull + model download

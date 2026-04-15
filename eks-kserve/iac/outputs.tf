@@ -33,3 +33,18 @@ output "ingress_hostname" {
   description = "NLB hostname for the Istio ingress gateway"
   value       = data.kubernetes_service.istio_ingress.status[0].load_balancer[0].ingress[0].hostname
 }
+
+output "grafana_url" {
+  description = "Public Grafana URL (admin / changeme-in-production)"
+  value       = "http://grafana.${local.public_domain}/"
+}
+
+output "llm1_url" {
+  description = "Public URL for the phi3 GPU inference service (vLLM OpenAI chat completions)"
+  value       = "http://llm1.kserve.${local.public_domain}/v1/chat/completions"
+}
+
+output "iris_url" {
+  description = "Public URL for the sklearn iris inference service"
+  value       = "http://iris.kserve.${local.public_domain}/v1/models/iris:predict"
+}
