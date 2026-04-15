@@ -6,13 +6,8 @@ resource "helm_release" "kuberay-operator" {
 
   depends_on = [time_sleep.wait_k8s_ready]
 
-  namespace = "kuberay-system"
+  namespace        = "kuberay-system"
   create_namespace = true
-
-  set {
-    name  = "installCRDs"
-    value = "true"
-  }
 }
 
 resource "time_sleep" "wait_ray_operator_ready" {
@@ -81,13 +76,13 @@ resource "kubernetes_ingress_v1" "ray_dashboard" {
     namespace = "default"
 
     annotations = {
-      "kubernetes.io/ingress.class"                  = "alb"
-      "alb.ingress.kubernetes.io/scheme"             = "internet-facing"
-      "alb.ingress.kubernetes.io/target-type"        = "ip"
-      "alb.ingress.kubernetes.io/listen-ports"       = "[{\"HTTP\": 80}]"
-      "alb.ingress.kubernetes.io/healthcheck-path"   = "/"
-      "alb.ingress.kubernetes.io/backend-protocol"   = "HTTP"
-      "alb.ingress.kubernetes.io/group.name"         = "ray-group"
+      "kubernetes.io/ingress.class"                = "alb"
+      "alb.ingress.kubernetes.io/scheme"           = "internet-facing"
+      "alb.ingress.kubernetes.io/target-type"      = "ip"
+      "alb.ingress.kubernetes.io/listen-ports"     = "[{\"HTTP\": 80}]"
+      "alb.ingress.kubernetes.io/healthcheck-path" = "/"
+      "alb.ingress.kubernetes.io/backend-protocol" = "HTTP"
+      "alb.ingress.kubernetes.io/group.name"       = "ray-group"
     }
   }
 
@@ -107,7 +102,7 @@ resource "kubernetes_ingress_v1" "ray_dashboard" {
             }
           }
         }
-      
+
       }
     }
   }
@@ -121,13 +116,13 @@ resource "kubernetes_ingress_v1" "ray_serve" {
     namespace = "default"
 
     annotations = {
-      "kubernetes.io/ingress.class"                  = "alb"
-      "alb.ingress.kubernetes.io/scheme"             = "internet-facing"
-      "alb.ingress.kubernetes.io/target-type"        = "ip"
-      "alb.ingress.kubernetes.io/listen-ports"       = "[{\"HTTP\": 8000}]"
-      "alb.ingress.kubernetes.io/healthcheck-path"   = "/"
-      "alb.ingress.kubernetes.io/backend-protocol"   = "HTTP"
-      "alb.ingress.kubernetes.io/group.name"         = "ray-group"
+      "kubernetes.io/ingress.class"                = "alb"
+      "alb.ingress.kubernetes.io/scheme"           = "internet-facing"
+      "alb.ingress.kubernetes.io/target-type"      = "ip"
+      "alb.ingress.kubernetes.io/listen-ports"     = "[{\"HTTP\": 8000}]"
+      "alb.ingress.kubernetes.io/healthcheck-path" = "/"
+      "alb.ingress.kubernetes.io/backend-protocol" = "HTTP"
+      "alb.ingress.kubernetes.io/group.name"       = "ray-group"
     }
   }
 
@@ -147,7 +142,7 @@ resource "kubernetes_ingress_v1" "ray_serve" {
             }
           }
         }
-      
+
       }
     }
   }
@@ -156,14 +151,15 @@ resource "kubernetes_ingress_v1" "ray_serve" {
 }
 
 
-# data "aws_lb" "selected" {
-#   tags = {
-#     Environment = "production"
-#     Service     = "web"
-#   }
-# }
 
-# # Output the DNS URL
-# output "lb_url" {
-#   value = data.aws_lb.selected.dns_name
-# }
+data "kubernetes_ingress_v1" "ray_dashboard" {
+  metadata {
+    name      = "ray-dashboard" 
+    namespace = "default"
+  }
+  depends_on = [kubernetes_ingress_v1.ray_serve]
+}
+
+output "ray_url" {
+  value = try("http://${data.kubernetes_ingress_v1.ray_dashboard.status[0].load_balancer[0].ingress[0].hostname}/","")
+}

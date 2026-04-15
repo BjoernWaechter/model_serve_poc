@@ -3,6 +3,7 @@ Installs an EKS cluster with installed Ray CRDs (custom resource defintion)
 ```
 cd model_serve_poc/iac/eks-ray
 terraform init
+terraform apply -target=time_sleep.wait_k8s_ready
 terraform apply
 ```
 

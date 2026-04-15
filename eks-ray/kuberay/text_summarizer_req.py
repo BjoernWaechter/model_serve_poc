@@ -34,6 +34,7 @@ Description
 Adults with chicks
 
 """
-print(text)
-res = requests.get("http://<loadbalancer>:8000/summarize", params={"text": text})
+#print(f"-{text}-END")
+res = requests.get("http://k8s-raygroup-fa3bac2354-1884733651.ap-southeast-2.elb.amazonaws.com:8000/summarize", params={"text": text})
+print(res)
 print(res.json())
