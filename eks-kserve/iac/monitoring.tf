@@ -55,7 +55,12 @@ resource "helm_release" "kube_prometheus_stack" {
               }
             }
           }
-          # Scrape KServe model server metrics
+          # Scrape KServe model server metrics.
+          # IMPORTANT: the `keep` on container name `kserve-container` is required.
+          # Without it, Prometheus scrapes every declared port on the pod, including
+          # queue-proxy:8012 (user-traffic port). Hits on :8012 count as real requests
+          # in Knative's concurrency metric and prevent scale-to-zero, pinning GPU nodes
+          # up indefinitely. The metrics path comes from the KServe-set annotation.
           additionalScrapeConfigs = [
             {
               job_name        = "kserve-model-servers"
@@ -66,6 +71,17 @@ resource "helm_release" "kube_prometheus_stack" {
                   source_labels = ["__meta_kubernetes_pod_label_serving_kserve_io_inferenceservice"]
                   action        = "keep"
                   regex         = ".+"
+                },
+                {
+                  source_labels = ["__meta_kubernetes_pod_container_name"]
+                  action        = "keep"
+                  regex         = "kserve-container"
+                },
+                {
+                  source_labels = ["__meta_kubernetes_pod_annotation_prometheus_kserve_io_path"]
+                  action        = "replace"
+                  regex         = "(.+)"
+                  target_label  = "__metrics_path__"
                 },
                 {
                   source_labels = ["__meta_kubernetes_namespace"]
