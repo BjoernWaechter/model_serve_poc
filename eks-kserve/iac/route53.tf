@@ -13,7 +13,7 @@ data "aws_route53_zone" "main" {
 # ingress service. The controller tags it with the originating service name.
 data "aws_lbs" "istio_ingress" {
   tags = {
-    "kubernetes.io/service-name" = "istio-system/istio-ingress"
+    "service.k8s.aws/stack" = "istio-system/istio-ingress"
   }
 
   depends_on = [helm_release.istio_ingress]

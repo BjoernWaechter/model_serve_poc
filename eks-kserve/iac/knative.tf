@@ -56,6 +56,7 @@ resource "kubectl_manifest" "knative_core" {
   depends_on = [
     kubectl_manifest.knative_crds,
     kubectl_manifest.knative_serving_ns,
+    helm_release.aws_lb_controller, # LBC webhook must be serving before creating Services
   ]
 }
 
@@ -135,6 +136,24 @@ resource "kubernetes_config_map_v1_data" "knative_config_network" {
   force = true
 
   depends_on = [kubectl_manifest.knative_core]
+}
+
+# The Istio gateway chart names the service "istio-ingress", but net-istio
+# defaults to "istio-ingressgateway".  Patch config-istio so Knative can
+# find the LB and mark routes as Ready.
+resource "kubernetes_config_map_v1_data" "knative_config_istio" {
+  metadata {
+    name      = "config-istio"
+    namespace = "knative-serving"
+  }
+
+  data = {
+    "gateway.knative-serving.knative-ingress-gateway" = "istio-ingress.istio-system.svc.cluster.local"
+  }
+
+  force = true
+
+  depends_on = [kubectl_manifest.knative_istio]
 }
 
 data "kubernetes_service" "istio_ingress" {
@@ -219,7 +238,10 @@ resource "kubectl_manifest" "knative_ingress_gateway" {
             - "*"
           port:
             name: http
-            number: 80
+            # The Istio gateway pod runs as non-root (uid 1337) and cannot
+            # bind to privileged port 80.  Envoy listens on 8080 instead;
+            # the Service maps external port 80 → targetPort 8080.
+            number: 8080
             protocol: HTTP
   YAML
 

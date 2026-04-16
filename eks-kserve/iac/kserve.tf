@@ -159,7 +159,10 @@ resource "null_resource" "kserve_controller_restart" {
     command = "kubectl --context=$(kubectl config current-context) rollout restart deployment/kserve-controller-manager -n kserve && kubectl --context=$(kubectl config current-context) rollout status deployment/kserve-controller-manager -n kserve --timeout=120s"
   }
 
-  depends_on = [kubectl_manifest.kserve_inferenceservice_config]
+  depends_on = [
+    kubectl_manifest.kserve_inferenceservice_config,
+    kubectl_manifest.kserve, # deployment must exist before we can restart it
+  ]
 }
 
 # Annotate KServe service account with IRSA role

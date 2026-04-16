@@ -19,6 +19,8 @@ echo "HTTP ${HTTP_CODE}"
 echo "Response: ${BODY}"
 echo ""
 
+rm -f /tmp/kserve_response.json
+
 if [ "$HTTP_CODE" = "200" ] && echo "$BODY" | grep -q '"predictions"'; then
   echo "PASS"
 else

@@ -78,7 +78,7 @@ CHAT_PAYLOAD = {
     "max_tokens": 100,
 }
 
-REQUEST_TIMEOUT = 1260  # seconds — must exceed the Knative revision timeout (1200s)
+REQUEST_TIMEOUT = 600  # seconds
 WATCH_INTERVAL = 3   # seconds — purely cosmetic live status
 
 ARTEFACT_DIR = Path("/tmp")

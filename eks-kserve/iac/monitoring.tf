@@ -139,7 +139,7 @@ resource "kubectl_manifest" "grafana_gateway" {
             - "*"
           port:
             name: http
-            number: 80
+            number: 8080
             protocol: HTTP
   YAML
 
