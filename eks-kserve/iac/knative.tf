@@ -253,6 +253,42 @@ resource "kubectl_manifest" "knative_config_autoscaler" {
   depends_on = [kubectl_manifest.knative_core]
 }
 
+# Raise Knative's per-request timeout ceiling so GPU cold starts (which can
+# exceed 5 min) don't get rejected by the admission webhook. The default
+# max-revision-timeout-seconds is 600; our InferenceServices set timeoutSeconds
+# to knative_progress_deadline (typically 1200).
+resource "kubernetes_config_map_v1_data" "knative_config_defaults" {
+  metadata {
+    name      = "config-defaults"
+    namespace = "knative-serving"
+  }
+
+  data = {
+    "revision-timeout-seconds"     = tostring(var.knative_progress_deadline)
+    "max-revision-timeout-seconds" = tostring(var.knative_progress_deadline)
+  }
+
+  force = true
+
+  depends_on = [kubectl_manifest.knative_core]
+}
+
+# The Knative activator caches config-defaults at startup and does not
+# hot-reload all values (e.g. max-revision-timeout-seconds).  Trigger a
+# rollout restart whenever the timeout settings change so in-flight
+# requests use the correct ceiling.
+resource "null_resource" "knative_activator_restart" {
+  triggers = {
+    timeout = var.knative_progress_deadline
+  }
+
+  provisioner "local-exec" {
+    command = "kubectl --context=$(kubectl config current-context) rollout restart deployment/activator -n knative-serving && kubectl --context=$(kubectl config current-context) rollout status deployment/activator -n knative-serving --timeout=120s"
+  }
+
+  depends_on = [kubernetes_config_map_v1_data.knative_config_defaults]
+}
+
 # Allow GPU tolerations and node selectors on Knative pod specs.
 # Uses kubernetes_config_map_v1_data to patch only our keys into the existing
 # config-features ConfigMap (deployed by knative_core) without overwriting it.

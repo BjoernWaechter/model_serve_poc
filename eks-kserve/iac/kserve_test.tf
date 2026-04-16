@@ -94,6 +94,10 @@ resource "kubectl_manifest" "phi3_gpu_test" {
     spec:
       predictor:
         minReplicas: 0
+        # Per-request timeout — must be long enough for the full cold-start
+        # chain (node scale-up + image pull + model download + vLLM init).
+        # Knative default is 300s (5 min) which is too short for GPU cold starts.
+        timeout: ${var.knative_progress_deadline}
         model:
           modelFormat:
             name: vLLM

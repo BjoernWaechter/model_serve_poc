@@ -22,7 +22,7 @@ module "vpc" {
     "10.0.20.0/24", # cpu      AZ-a
     "10.0.21.0/24", # cpu      AZ-b
     "10.0.22.0/24", # cpu      AZ-c
-    "10.0.30.0/24", # gpu      AZ-a
+    "10.0.30.0/24", # gpu      AZ-a  (eks.tf filters to AZs where GPU type is offered)
     "10.0.31.0/24", # gpu      AZ-b
     "10.0.32.0/24", # gpu      AZ-c
   ]

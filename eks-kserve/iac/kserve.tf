@@ -64,6 +64,7 @@ resource "kubectl_manifest" "kserve" {
   depends_on = [
     kubectl_manifest.kserve_crds,
     kubectl_manifest.kserve_ns,
+    kubectl_manifest.kserve_inferenceservice_config,
   ]
 }
 
@@ -143,7 +144,7 @@ resource "kubectl_manifest" "kserve_inferenceservice_config" {
   server_side_apply = true
   force_conflicts   = true
 
-  depends_on = [kubectl_manifest.kserve]
+  depends_on = [kubectl_manifest.kserve_ns]
 }
 
 # KServe caches inferenceservice-config at controller startup and does not

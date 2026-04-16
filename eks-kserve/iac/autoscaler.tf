@@ -38,9 +38,10 @@ resource "helm_release" "cluster_autoscaler" {
         }
       }
 
-      # Only manage node groups tagged with k8s.io/cluster-autoscaler/enabled
+      # autoDiscovery.clusterName above already generates
+      # --node-group-auto-discovery; do NOT duplicate it here or the CAS
+      # discovers each ASG twice and double-scales with balance-similar-node-groups.
       extraArgs = {
-        "node-group-auto-discovery" = "asg:tag=k8s.io/cluster-autoscaler/enabled,k8s.io/cluster-autoscaler/${module.eks.cluster_name}"
         "balance-similar-node-groups"   = "true"
         "skip-nodes-with-system-pods"   = "false"
         "scale-down-delay-after-add"       = var.cas_scale_down_delay_after_add

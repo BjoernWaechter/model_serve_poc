@@ -125,7 +125,18 @@ module "eks" {
       min_size       = var.gpu_node_min
       max_size       = var.gpu_node_max
       desired_size   = var.gpu_node_desired
-      subnet_ids     = slice(module.vpc.private_subnets, 6, 9) # 10.0.3x.xx
+      # GPU subnets are indices 6-8 (10.0.3x.xx), one per AZ. Not every AZ
+      # offers every GPU instance type (e.g. g5 is absent from ap-southeast-2b),
+      # so filter to only AZs where the instance type is actually available.
+      # Without this the ASG tries the unsupported AZ, fails, and enters backoff
+      # which blocks scale-up entirely.
+      subnet_ids = [
+        for i, sid in slice(module.vpc.private_subnets, 6, 9) : sid
+        if contains(
+          data.aws_ec2_instance_type_offerings.gpu.locations,
+          data.aws_availability_zones.available.names[i % length(data.aws_availability_zones.available.names)]
+        )
+      ]
 
       ami_type = "AL2023_x86_64_NVIDIA" # Amazon Linux 2023 with NVIDIA drivers pre-installed
 
