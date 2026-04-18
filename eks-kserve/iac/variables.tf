@@ -116,6 +116,58 @@ variable "argocd_github_pat" {
   sensitive   = true
 }
 
+# -----------------------------------------------------------------------------
+# Teams — multi-tenant namespace + AppProject definition
+# -----------------------------------------------------------------------------
+# Single source of truth for per-team cluster scaffolding. Each map entry drives
+# namespaces.tf (namespace, ResourceQuota, LimitRange, NetworkPolicy) and
+# argocd_projects.tf (AppProject). Map key = namespace name.
+#
+# Omit source_repos (or leave it empty) to skip AppProject creation while still
+# getting the namespace + quotas — useful for namespaces not managed by GitOps.
+variable "teams" {
+  description = "Per-team namespaces + optional Argo CD AppProjects. Map key is the namespace name."
+  type = map(object({
+    # ------------------- Argo CD AppProject (optional) --------------------
+    # Empty source_repos skips the AppProject; the namespace/quota/netpol
+    # below still get created.
+    source_repos = optional(list(string), [])
+
+    # OIDC group names granted the `developer` role (sync+get) on the project.
+    # Requires an OIDC provider in Argo CD — Dex is off in argocd.tf by default.
+    oidc_groups = optional(list(string), [])
+
+    # Extra labels merged onto the namespace (on top of Istio + KServe + team).
+    namespace_labels = optional(map(string), {})
+
+    # ----------------------- ResourceQuota (K8s) --------------------------
+    # Defaults match the current cluster-wide numbers in namespaces.tf so an
+    # entry of `{}` preserves existing behavior.
+    resource_quota = optional(object({
+      requests_cpu       = optional(string, "32")
+      requests_memory    = optional(string, "128Gi")
+      limits_cpu         = optional(string, "64")
+      limits_memory      = optional(string, "256Gi")
+      requests_gpu       = optional(string, "4")
+      limits_gpu         = optional(string, "4")
+      inference_services = optional(string, "20")
+    }), {})
+
+    # ------------------------ LimitRange (K8s) ----------------------------
+    limit_range = optional(object({
+      default_cpu            = optional(string, "500m")
+      default_memory         = optional(string, "1Gi")
+      default_request_cpu    = optional(string, "100m")
+      default_request_memory = optional(string, "256Mi")
+    }), {})
+  }))
+  default = {
+    team-a        = {}
+    team-b        = {}
+    team-platform = {}
+  }
+}
+
 variable "tags" {
   description = "Common tags applied to all resources"
   type        = map(string)

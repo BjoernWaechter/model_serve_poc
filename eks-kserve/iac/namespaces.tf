@@ -1,40 +1,47 @@
-locals {
-  teams = ["team-a", "team-b", "team-platform"]
-}
+# =============================================================================
+# Per-team namespaces + K8s guardrails
+# =============================================================================
+# Driven by var.teams — the single source of truth for team scaffolding (see
+# variables.tf). argocd_projects.tf reads the same variable to create one
+# AppProject per team (when source_repos is set).
 
 resource "kubernetes_namespace" "team" {
-  for_each = toset(local.teams)
+  for_each = var.teams
 
   metadata {
-    name = each.value
+    name = each.key
 
-    labels = {
-      "istio-injection"                         = "enabled"
-      "serving.kserve.io/inferenceservice"      = "enabled"
-      "app.kubernetes.io/managed-by"            = "terraform"
-    }
+    labels = merge(
+      {
+        "istio-injection"                    = "enabled"
+        "serving.kserve.io/inferenceservice" = "enabled"
+        "app.kubernetes.io/managed-by"       = "terraform"
+        "team"                               = each.key
+      },
+      each.value.namespace_labels,
+    )
   }
 
   depends_on = [module.eks]
 }
 
 resource "kubernetes_resource_quota" "team" {
-  for_each = toset(local.teams)
+  for_each = var.teams
 
   metadata {
     name      = "team-quota"
-    namespace = each.value
+    namespace = each.key
   }
 
   spec {
     hard = {
-      "requests.cpu"            = "32"
-      "requests.memory"         = "128Gi"
-      "limits.cpu"              = "64"
-      "limits.memory"           = "256Gi"
-      "requests.nvidia.com/gpu" = "4"
-      "limits.nvidia.com/gpu"   = "4"
-      "count/inferenceservices.serving.kserve.io" = "20"
+      "requests.cpu"                              = each.value.resource_quota.requests_cpu
+      "requests.memory"                           = each.value.resource_quota.requests_memory
+      "limits.cpu"                                = each.value.resource_quota.limits_cpu
+      "limits.memory"                             = each.value.resource_quota.limits_memory
+      "requests.nvidia.com/gpu"                   = each.value.resource_quota.requests_gpu
+      "limits.nvidia.com/gpu"                     = each.value.resource_quota.limits_gpu
+      "count/inferenceservices.serving.kserve.io" = each.value.resource_quota.inference_services
     }
   }
 
@@ -42,23 +49,23 @@ resource "kubernetes_resource_quota" "team" {
 }
 
 resource "kubernetes_limit_range" "team" {
-  for_each = toset(local.teams)
+  for_each = var.teams
 
   metadata {
     name      = "team-limits"
-    namespace = each.value
+    namespace = each.key
   }
 
   spec {
     limit {
       type = "Container"
       default = {
-        cpu    = "500m"
-        memory = "1Gi"
+        cpu    = each.value.limit_range.default_cpu
+        memory = each.value.limit_range.default_memory
       }
       default_request = {
-        cpu    = "100m"
-        memory = "256Mi"
+        cpu    = each.value.limit_range.default_request_cpu
+        memory = each.value.limit_range.default_request_memory
       }
     }
   }
@@ -68,11 +75,11 @@ resource "kubernetes_limit_range" "team" {
 
 # Network policy — deny all cross-namespace traffic
 resource "kubernetes_network_policy" "team_isolation" {
-  for_each = toset(local.teams)
+  for_each = var.teams
 
   metadata {
     name      = "deny-cross-namespace"
-    namespace = each.value
+    namespace = each.key
   }
 
   spec {

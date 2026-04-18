@@ -14,3 +14,22 @@ route53_zone_id = "ZXXXXXXXXXXXXX"
 # PAT scope needed: `repo` for private repos, `public_repo` for public-only.
 # argocd_github_url_prefix = "https://github.com/your-org"
 # argocd_github_pat        = "ghp_xxxxxxxxxxxxxxxxxxxx"
+
+# Optional: per-team namespaces + AppProjects. Map key is the namespace name.
+# Unset = three demo teams (team-a, team-b, team-platform) with default quotas
+# and no AppProjects. Setting `source_repos` on a team enables its AppProject;
+# resource_quota / limit_range accept per-field overrides (see variables.tf).
+# teams = {
+#   team-a = {
+#     source_repos = ["https://github.com/your-org/models-iris.git"]
+#     oidc_groups  = ["your-org:team-iris"]
+#     resource_quota = {
+#       requests_gpu = "8"   # override the "4" default
+#       limits_gpu   = "8"
+#     }
+#   }
+#   team-b = {
+#     source_repos = ["https://github.com/your-org/models-fraud.git"]
+#   }
+#   team-platform = {}       # namespace + default quotas, no AppProject
+# }
