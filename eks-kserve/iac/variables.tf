@@ -82,6 +82,22 @@ variable "alb_idle_timeout_seconds" {
   default     = 60
 }
 
+# -----------------------------------------------------------------------------
+# Argo CD
+# -----------------------------------------------------------------------------
+
+variable "install_argocd" {
+  description = "Install Argo CD (argo-helm chart) fronted by its own ALB Ingress at argocd.<public_domain>"
+  type        = bool
+  default     = true
+}
+
+variable "argocd_chart_version" {
+  description = "argo-cd Helm chart version (https://artifacthub.io/packages/helm/argo/argo-cd)"
+  type        = string
+  default     = "9.5.2"
+}
+
 variable "tags" {
   description = "Common tags applied to all resources"
   type        = map(string)

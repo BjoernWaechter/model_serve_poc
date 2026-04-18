@@ -65,7 +65,10 @@ resource "helm_release" "istiod" {
     })
   ]
 
-  depends_on = [helm_release.istio_base]
+  # aws_lb_controller installs a cluster-wide mutating webhook on Services.
+  # istiod creates Services (istiod, istiod-remote); without this dependency
+  # the webhook has no endpoints yet and the API server rejects the create.
+  depends_on = [helm_release.istio_base, helm_release.aws_lb_controller]
 }
 
 # ---------------------------------------------------------------------------
@@ -101,7 +104,7 @@ resource "helm_release" "aws_lb_controller" {
     })
   ]
 
-  depends_on = [module.eks]
+  depends_on = [module.eks, module.aws_lb_controller_irsa]
 }
 
 resource "helm_release" "istio_ingress" {

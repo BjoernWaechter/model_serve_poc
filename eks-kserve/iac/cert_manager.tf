@@ -51,5 +51,8 @@ resource "helm_release" "cert_manager" {
   ]
 
 
-  depends_on = [module.eks]
+  # aws_lb_controller installs a cluster-wide mutating webhook on Services.
+  # cert-manager creates Services; without this dependency the webhook has no
+  # endpoints yet and the API server rejects the create.
+  depends_on = [module.eks, helm_release.aws_lb_controller]
 }

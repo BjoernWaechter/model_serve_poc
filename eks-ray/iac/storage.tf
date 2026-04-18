@@ -4,6 +4,7 @@
 
 resource "aws_s3_bucket" "model_artifacts" {
   bucket = "${var.cluster_name}-model-artifacts-${data.aws_caller_identity.current.account_id}"
+  force_destroy = true
 }
 
 resource "aws_s3_bucket_versioning" "model_artifacts" {

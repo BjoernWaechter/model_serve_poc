@@ -94,3 +94,21 @@ resource "aws_route53_record" "mlflow" {
     evaluate_target_health = false
   }
 }
+
+# Argo CD on its own ALB. Same alias-to-ALB pattern as mlflow — the Ingress
+# blocks until the LBC has populated the hostname, so this record resolves
+# on first apply.
+resource "aws_route53_record" "argocd" {
+  count = var.install_argocd ? 1 : 0
+
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = "argocd.${local.public_domain}"
+  type            = "A"
+  allow_overwrite = true
+
+  alias {
+    name                   = kubernetes_ingress_v1.argocd[0].status[0].load_balancer[0].ingress[0].hostname
+    zone_id                = data.aws_lb_hosted_zone_id.alb.id
+    evaluate_target_health = false
+  }
+}

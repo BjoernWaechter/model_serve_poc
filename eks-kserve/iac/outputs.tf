@@ -63,3 +63,18 @@ output "mlflow_admin_password" {
   description = "MLflow admin password"
   value       = try(nonsensitive(module.mlflow[0].admin_password), "")
 }
+
+output "argocd_url" {
+  description = "Public Argo CD URL (null when install_argocd=false)"
+  value       = var.install_argocd ? "http://argocd.${local.public_domain}/" : null
+}
+
+output "argocd_admin_user" {
+  description = "Argo CD admin username"
+  value       = var.install_argocd ? "admin" : null
+}
+
+output "argocd_admin_password" {
+  description = "Argo CD bootstrap admin password (rotate in the UI after first login)"
+  value       = try(nonsensitive(data.kubernetes_secret.argocd_admin[0].data["password"]), "")
+}
