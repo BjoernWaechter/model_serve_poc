@@ -24,6 +24,8 @@ resource "kubectl_manifest" "sklearn_iris_test" {
       namespace: kserve-test
     spec:
       predictor:
+        minReplicas: 2
+        maxReplicas: ${var.cpu_node_max}
         model:
           modelFormat:
             name: sklearn

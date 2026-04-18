@@ -157,6 +157,40 @@ resource "helm_release" "kube_prometheus_stack" {
           }]
         }
       }
+
+      # The operator deployment + its admission-webhook patch Job + kube-state-metrics
+      # all schedule separately from prometheus/grafana/alertmanager and need their
+      # own node pinning, else they stall Pending on a CriticalAddonsOnly-tainted cluster.
+      prometheusOperator = {
+        nodeSelector = { role = "system" }
+        tolerations = [{
+          key      = "CriticalAddonsOnly"
+          operator = "Equal"
+          value    = "true"
+          effect   = "NoSchedule"
+        }]
+        admissionWebhooks = {
+          patch = {
+            nodeSelector = { role = "system" }
+            tolerations = [{
+              key      = "CriticalAddonsOnly"
+              operator = "Equal"
+              value    = "true"
+              effect   = "NoSchedule"
+            }]
+          }
+        }
+      }
+
+      "kube-state-metrics" = {
+        nodeSelector = { role = "system" }
+        tolerations = [{
+          key      = "CriticalAddonsOnly"
+          operator = "Equal"
+          value    = "true"
+          effect   = "NoSchedule"
+        }]
+      }
     })
   ]
 

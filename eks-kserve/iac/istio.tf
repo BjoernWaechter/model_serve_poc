@@ -112,6 +112,18 @@ resource "helm_release" "istio_ingress" {
   namespace  = "istio-system"
   timeout    = 600 # LBC NLB provisioning can take a few minutes
 
+  values = [
+    yamlencode({
+      nodeSelector = { role = "system" }
+      tolerations = [{
+        key      = "CriticalAddonsOnly"
+        operator = "Equal"
+        value    = "true" # must be a string — helm `set` coerces "true" to bool
+        effect   = "NoSchedule"
+      }]
+    })
+  ]
+
   set {
     name  = "service.type"
     value = "LoadBalancer"

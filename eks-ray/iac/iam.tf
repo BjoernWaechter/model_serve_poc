@@ -18,7 +18,7 @@ module "ebs_csi_irsa" {
   }
 }
 
-# EFS CSI Driver (for GPU model weight caching across nodes)
+# EFS CSI Driver (for model weight caching shared across GPU nodes)
 module "efs_csi_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.0"
@@ -32,30 +32,6 @@ module "efs_csi_irsa" {
       namespace_service_accounts = ["kube-system:efs-csi-controller-sa"]
     }
   }
-}
-
-# S3 access for KServe to pull model artifacts
-resource "aws_iam_policy" "model_s3_access" {
-  name        = "${var.cluster_name}-model-s3-access"
-  description = "Allows KServe to pull model artifacts from S3"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:ListBucket",
-          "s3:GetBucketLocation",
-        ]
-        Resource = [
-          aws_s3_bucket.model_artifacts.arn,
-          "${aws_s3_bucket.model_artifacts.arn}/*",
-        ]
-      }
-    ]
-  })
 }
 
 # AWS Load Balancer Controller
@@ -74,34 +50,12 @@ module "aws_lb_controller_irsa" {
   }
 }
 
-# KServe model serving role
-module "model_serving_irsa" {
-  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-  version = "~> 5.0"
-
-  role_name = "${var.cluster_name}-model-serving"
-
-  role_policy_arns = {
-    s3 = aws_iam_policy.model_s3_access.arn
-  }
-
-  oidc_providers = {
-    main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["kserve:kserve-controller-manager"]
-    }
-  }
-}
-
-# MLflow tracking server: needs S3 read+write on the shared artifact bucket so
-# clients can log models through the server (serveArtifacts path) and so future
-# operations (signed URL generation, artifact deletion) keep working. KServe's
-# own IRSA role is read-only — by design — so we don't reuse it here.
-resource "aws_iam_policy" "mlflow_s3_access" {
-  count = var.install_mlflow ? 1 : 0
-
-  name        = "${var.cluster_name}-mlflow-s3-access"
-  description = "S3 read/write/list for the MLflow tracking server on the model artifact bucket"
+# S3 access for Ray working_dir / model artifact downloads. Scoped to the
+# cluster's artifact bucket and the public Ray example bucket that the
+# text-summarizer RayService references.
+resource "aws_iam_policy" "ray_s3_access" {
+  name        = "${var.cluster_name}-ray-s3-access"
+  description = "S3 access for Ray working_dir and model artifact downloads"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -110,36 +64,59 @@ resource "aws_iam_policy" "mlflow_s3_access" {
         Effect = "Allow"
         Action = [
           "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
           "s3:ListBucket",
           "s3:GetBucketLocation",
         ]
         Resource = [
           aws_s3_bucket.model_artifacts.arn,
           "${aws_s3_bucket.model_artifacts.arn}/*",
+          "arn:aws:s3:::ray-${var.region}",
+          "arn:aws:s3:::ray-${var.region}/*",
         ]
       }
     ]
   })
 }
 
-module "mlflow_irsa" {
-  count = var.install_mlflow ? 1 : 0
-
+# Bind to the Ray pod service account (default "default" SA in the
+# ray-serve namespace; update namespace_service_accounts if you use a
+# dedicated SA). Replaces the node-IAM-role fallback that the existing
+# Bottlerocket + httpPutResponseHopLimit=2 hack relies on.
+module "ray_serving_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.0"
 
-  role_name = "${var.cluster_name}-mlflow"
+  role_name = "${var.cluster_name}-ray-serving"
 
   role_policy_arns = {
-    s3 = aws_iam_policy.mlflow_s3_access[0].arn
+    s3 = aws_iam_policy.ray_s3_access.arn
   }
 
   oidc_providers = {
     main = {
+      provider_arn = module.eks.oidc_provider_arn
+      namespace_service_accounts = [
+        "ray-serve:default",
+        "ray-serve:ray-serving",
+      ]
+    }
+  }
+}
+
+# Cluster Autoscaler (manages the system + cpu managed node groups only;
+# Karpenter handles the GPU pool and is not ASG-based, so CAS ignores it).
+module "cluster_autoscaler_irsa" {
+  source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
+  version = "~> 5.0"
+
+  role_name                        = "${var.cluster_name}-cluster-autoscaler"
+  attach_cluster_autoscaler_policy = true
+  cluster_autoscaler_cluster_names = [module.eks.cluster_name]
+
+  oidc_providers = {
+    main = {
       provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["mlflow:mlflow"]
+      namespace_service_accounts = ["kube-system:cluster-autoscaler"]
     }
   }
 }

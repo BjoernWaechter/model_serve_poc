@@ -47,8 +47,54 @@ data "kubectl_file_documents" "knative_core" {
   content = data.http.knative_core.response_body
 }
 
+locals {
+  # Pin Knative control-plane deployments (activator, autoscaler, controller,
+  # webhook) to the system MNG. Upstream serving-core.yaml ships these without
+  # a nodeSelector or CriticalAddonsOnly toleration, so on a cluster whose only
+  # non-inference nodes carry the CriticalAddonsOnly taint they are unschedulable.
+  knative_core_manifests = {
+    for k, v in data.kubectl_file_documents.knative_core.manifests : k => (
+      try(yamldecode(v).kind, "") == "Deployment"
+        ? yamlencode(merge(
+            yamldecode(v),
+            {
+              spec = merge(
+                yamldecode(v).spec,
+                {
+                  template = merge(
+                    yamldecode(v).spec.template,
+                    {
+                      spec = merge(
+                        yamldecode(v).spec.template.spec,
+                        {
+                          nodeSelector = merge(
+                            try(yamldecode(v).spec.template.spec.nodeSelector, {}),
+                            { role = "system" }
+                          )
+                          tolerations = concat(
+                            try(yamldecode(v).spec.template.spec.tolerations, []),
+                            [{
+                              key      = "CriticalAddonsOnly"
+                              operator = "Equal"
+                              value    = "true"
+                              effect   = "NoSchedule"
+                            }]
+                          )
+                        }
+                      )
+                    }
+                  )
+                }
+              )
+            }
+          ))
+        : v
+    )
+  }
+}
+
 resource "kubectl_manifest" "knative_core" {
-  for_each          = data.kubectl_file_documents.knative_core.manifests
+  for_each          = local.knative_core_manifests
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true
@@ -79,12 +125,55 @@ locals {
     for k, v in data.kubectl_file_documents.knative_istio.manifests : k => v
     if !anytrue([for name in local.knative_istio_excluded : strcontains(v, "name: ${name}")])
   }
+
+  # Pin net-istio-controller and net-istio-webhook to the system MNG for the
+  # same reason as knative_core above — upstream net-istio.yaml has no
+  # CriticalAddonsOnly toleration.
+  knative_istio_manifests = {
+    for k, v in local.knative_istio_filtered : k => (
+      try(yamldecode(v).kind, "") == "Deployment"
+        ? yamlencode(merge(
+            yamldecode(v),
+            {
+              spec = merge(
+                yamldecode(v).spec,
+                {
+                  template = merge(
+                    yamldecode(v).spec.template,
+                    {
+                      spec = merge(
+                        yamldecode(v).spec.template.spec,
+                        {
+                          nodeSelector = merge(
+                            try(yamldecode(v).spec.template.spec.nodeSelector, {}),
+                            { role = "system" }
+                          )
+                          tolerations = concat(
+                            try(yamldecode(v).spec.template.spec.tolerations, []),
+                            [{
+                              key      = "CriticalAddonsOnly"
+                              operator = "Equal"
+                              value    = "true"
+                              effect   = "NoSchedule"
+                            }]
+                          )
+                        }
+                      )
+                    }
+                  )
+                }
+              )
+            }
+          ))
+        : v
+    )
+  }
 }
 
 # Knative Istio integration — excludes Gateway and Service resources that
 # need selector overrides (managed separately below).
 resource "kubectl_manifest" "knative_istio" {
-  for_each          = local.knative_istio_filtered
+  for_each          = local.knative_istio_manifests
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true
@@ -338,8 +427,9 @@ resource "kubernetes_config_map_v1_data" "knative_config_features" {
   }
 
   data = {
-    "kubernetes.podspec-tolerations"  = "enabled"
-    "kubernetes.podspec-nodeselector" = "enabled"
+    "kubernetes.podspec-tolerations"               = "enabled"
+    "kubernetes.podspec-nodeselector"              = "enabled"
+    "kubernetes.podspec-topologyspreadconstraints" = "enabled"
   }
 
   force = true

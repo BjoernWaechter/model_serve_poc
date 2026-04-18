@@ -60,6 +60,28 @@ variable "deploy_test" {
   default     = true
 }
 
+# -----------------------------------------------------------------------------
+# MLflow
+# -----------------------------------------------------------------------------
+
+variable "install_mlflow" {
+  description = "Install MLflow (Bitnami chart) fronted by its own ALB Ingress"
+  type        = bool
+  default     = true
+}
+
+variable "aws_account_id" {
+  description = "AWS account ID whose ECR pull-through cache hosts the Bitnami chart images (required when install_mlflow=true)"
+  type        = string
+  default     = ""
+}
+
+variable "alb_idle_timeout_seconds" {
+  description = "ALB idle timeout for the MLflow Ingress"
+  type        = number
+  default     = 60
+}
+
 variable "tags" {
   description = "Common tags applied to all resources"
   type        = map(string)

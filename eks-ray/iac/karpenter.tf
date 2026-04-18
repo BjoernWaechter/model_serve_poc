@@ -1,159 +1,32 @@
-data "aws_caller_identity" "current" {}
-
 module "karpenter" {
   count = var.karpenter_enabled ? 1 : 0
 
-  source  = "terraform-aws-modules/eks/aws//modules/karpenter"
-  version = "20.37.0"
+  source = "../../modules/karpenter"
 
-  cluster_name = module.eks.cluster_name
+  providers = {
+    aws.us_east_1 = aws.us_east_1
+  }
 
-  irsa_oidc_provider_arn          = module.eks.oidc_provider_arn
-  irsa_namespace_service_accounts = ["karpenter:karpenter"]
+  cluster_name      = module.eks.cluster_name
+  cluster_endpoint  = module.eks.cluster_endpoint
+  oidc_provider_arn = module.eks.oidc_provider_arn
+  region            = var.region
+  account_id        = data.aws_caller_identity.current.account_id
 
-  create_iam_role      = true
-  create_node_iam_role = true
-  enable_irsa          = true
-  create_access_entry  = true
-  iam_role_name        = "${module.eks.cluster_name}-karpenter-controller"
-  node_iam_role_name   = "${module.eks.cluster_name}-karpenter-node"
+  karpenter_version           = var.karpenter_version
+  enable_capacity_reservation = var.karpenter_cr_enabled
 
-  node_iam_role_attach_cni_policy = true
   node_iam_role_additional_policies = {
     s3_policy = "arn:aws:iam::aws:policy/AmazonS3ReadOnlyAccess"
   }
-
-  # Capacity reservation support (ODCR and Capacity Blocks for ML)
-  iam_policy_statements = var.karpenter_cr_enabled ? [
-    {
-      sid       = "AllowDescribeCapacityReservations"
-      effect    = "Allow"
-      actions   = ["ec2:DescribeCapacityReservations"]
-      resources = ["*"]
-    },
-    {
-      sid       = "AllowRunInstancesOnCapacityReservation"
-      effect    = "Allow"
-      actions   = ["ec2:RunInstances", "ec2:CreateFleet"]
-      resources = ["arn:aws:ec2:${var.region}:${data.aws_caller_identity.current.account_id}:capacity-reservation/*"]
-    }
-  ] : []
-
 }
 
-# aws-auth ConfigMap is managed by the EKS module itself; Karpenter nodes
-# join the cluster via an EKS access entry (create_access_entry = true above),
-# so we do NOT create a separate aws-auth ConfigMap here.
-
-resource "helm_release" "karpenter-crd" {
-  count = var.karpenter_enabled ? 1 : 0
-
-  name       = "karpenter-crd"
-  chart      = "karpenter-crd"
-  repository = "oci://public.ecr.aws/karpenter/"
-  version    = var.karpenter_version
-  namespace  = "karpenter"
-  create_namespace = true
-}
-
-resource "helm_release" "karpenter" {
-  count = var.karpenter_enabled ? 1 : 0
-
-  name             = "karpenter"
-  chart            = "karpenter"
-  cleanup_on_fail  = true
-  create_namespace = true
-  repository       = "oci://public.ecr.aws/karpenter/"
-  version          = var.karpenter_version
-  namespace        = "karpenter"
-  timeout          = 300
-  wait             = true
-
-  values = [
-    <<-EOT
-      controller:
-        resources:
-          limits:
-            cpu: 1
-            memory: 2Gi
-          requests:
-            cpu: 1
-            memory: 2Gi
-      settings:
-        clusterName: "${module.eks.cluster_name}"
-        clusterEndpoint: "${module.eks.cluster_endpoint}"
-        interruptionQueue: "${module.karpenter[0].queue_name}"
-        featureGates:
-          reservedCapacity: ${var.karpenter_cr_enabled}
-      serviceAccount:
-        annotations:
-          eks.amazonaws.com/role-arn: "${module.karpenter[0].iam_role_arn}"
-      webhook:
-        enabled: false
-    EOT
-  ]
-
-  depends_on = [helm_release.karpenter-crd, module.cluster_autoscaler]
-
-}
-
-# Note: there is no upstream "karpenter-components" Helm chart. The EC2NodeClass
-# and NodePool custom resources below replace that block.
-
-# module "karpenter_iam_role" {
-#   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
-#   version = "~> 5.0"
-
-#   role_name_prefix                   = "karpenter-controller"
-#   attach_karpenter_controller_policy = true
-
-#   oidc_providers = {
-#     eks = {
-#       provider_arn               = module.eks.oidc_provider_arn
-#       namespace_service_accounts = ["karpenter:karpenter"]
-#     }
-#   }
-# }
-
-# resource "aws_sqs_queue" "karpenter" {
-#   name = "${module.eks.cluster_name}-karpenter"
-# }
-
-# (Removed duplicate helm_release.karpenter_crds — the karpenter-crd chart is
-# already installed above as helm_release.karpenter-crd at the pinned version.)
-
-# resource "helm_release" "karpenter" {
-#   name       = "karpenter"
-#   namespace  = "karpenter"
-#   repository = "oci://public.ecr.aws/karpenter"
-#   chart      = "karpenter"
-#   version    = "1.10.0" # or latest stable
-
-#   create_namespace = true
-
-#   set {
-#     name  = "serviceAccount.annotations.eks\\.amazonaws\\.com/role-arn"
-#     value = aws_iam_role.karpenter_role.arn
-#   }
-
-#   set {
-#     name  = "settings.clusterName"
-#     value = module.eks.cluster_name
-#   }
-
-#   set {
-#     name  = "settings.clusterEndpoint"
-#     value = module.eks.cluster_endpoint
-#   }
-
-#   set {
-#     name  = "settings.interruptionQueue"
-#     value = aws_sqs_queue.karpenter.name
-#   }
-#   depends_on = [time_sleep.wait_k8s_ready]
-# }
-
-
+# GPU EC2NodeClass — Bottlerocket has an official NVIDIA variant that
+# Karpenter auto-selects for GPU-labeled instance types via the
+# `bottlerocket@latest` alias. Drivers + container toolkit are baked in, so
+# the NVIDIA GPU Operator only needs to deploy the device plugin and DCGM
+# exporter (driver.enabled=false, toolkit.enabled=false in gpu_operator.tf)
+# — matching the kserve cluster's AL2023_x86_64_NVIDIA behaviour.
 resource "kubectl_manifest" "karpenter_gpu_nodeclass" {
   count = var.karpenter_enabled ? 1 : 0
 
@@ -164,29 +37,26 @@ resource "kubectl_manifest" "karpenter_gpu_nodeclass" {
       name = "gpu"
     }
     spec = {
-      # Bottlerocket has an official NVIDIA variant selected by the @latest alias.
       amiSelectorTerms = [
-        {
-          alias = "bottlerocket@latest"
-        }
+        { alias = "bottlerocket@latest" }
       ]
       role = module.karpenter[0].node_iam_role_name
-      # Allow pods to reach IMDSv2 so boto3 can fall back to the node IAM
-      # role credentials (needed for Ray `working_dir: s3://...` downloads).
-      # Default hopLimit is 1 which only serves the host; pods are one hop
-      # further and get NoCredentialsError. For a proper prod setup, use
-      # IRSA on the Ray pod service account instead.
+
+      # Pods use IRSA (see iam.tf -> ray_serving_irsa); hopLimit=2 is kept
+      # so any workload that still falls through to the node IAM role can
+      # reach IMDSv2 from inside the pod network namespace.
       metadataOptions = {
         httpEndpoint            = "enabled"
         httpTokens              = "required"
         httpPutResponseHopLimit = 2
       }
+
       # Bottlerocket uses two EBS volumes:
-      #   /dev/xvda - OS volume (small)
-      #   /dev/xvdb - data / containerd volume (holds pulled images)
-      # The default 20Gi data volume is too small for ray-ml GPU images
-      # (~10Gi+ compressed, more uncompressed) and causes kubelet
-      # ephemeral-storage eviction during image pull. Bump to 200Gi.
+      #   /dev/xvda — OS volume (small, read-only root)
+      #   /dev/xvdb — data / containerd volume (holds pulled images)
+      # Default data volume is ~20Gi which is too small for ray-ml/vLLM GPU
+      # images and causes kubelet ephemeral-storage eviction during image
+      # pull. Bump to 500Gi to match the kserve GPU node group.
       blockDeviceMappings = [
         {
           deviceName = "/dev/xvda"
@@ -200,34 +70,32 @@ resource "kubectl_manifest" "karpenter_gpu_nodeclass" {
         {
           deviceName = "/dev/xvdb"
           ebs = {
-            volumeSize          = "200Gi"
+            volumeSize          = "500Gi"
             volumeType          = "gp3"
+            iops                = 6000
+            throughput          = 500
             encrypted           = true
             deleteOnTermination = true
           }
         }
       ]
+
+      # Discovery-tagged only on the 10.0.3x.xx subnets (see vpc.tf).
       subnetSelectorTerms = [
-        {
-          tags = {
-            "karpenter.sh/discovery" = var.cluster_name
-          }
-        }
+        { tags = { "karpenter.sh/discovery" = var.cluster_name } }
       ]
       securityGroupSelectorTerms = [
-        {
-          tags = {
-            "karpenter.sh/discovery" = var.cluster_name
-          }
-        }
+        { tags = { "karpenter.sh/discovery" = var.cluster_name } }
       ]
       tags = {
         "karpenter.sh/discovery" = var.cluster_name
+        "role"                   = "ray"
+        "ray.io/purpose"         = "gpu"
       }
     }
   })
 
-  depends_on = [helm_release.karpenter]
+  depends_on = [module.karpenter]
 }
 
 resource "kubectl_manifest" "karpenter_gpu_provisioner" {
@@ -237,13 +105,15 @@ resource "kubectl_manifest" "karpenter_gpu_provisioner" {
     apiVersion = "karpenter.sh/v1"
     kind       = "NodePool"
     metadata = {
-      name = "gpu-g4dn"
+      name = "gpu"
     }
     spec = {
       template = {
         metadata = {
           labels = {
-            workload = "gpu"
+            role                     = "ray"
+            "ray.io/purpose"         = "gpu"
+            "nvidia.com/gpu.present" = "true"
           }
         }
         spec = {
@@ -251,17 +121,28 @@ resource "kubectl_manifest" "karpenter_gpu_provisioner" {
             {
               key      = "node.kubernetes.io/instance-type"
               operator = "In"
-              values   = ["g4dn.xlarge"]
+              values   = [var.gpu_node_instance_type]
             },
             {
               key      = "karpenter.sh/capacity-type"
               operator = "In"
-              values   = ["on-demand"]
+              values   = [var.karpenter_capacity_type]
             },
             {
               key      = "kubernetes.io/arch"
               operator = "In"
               values   = ["amd64"]
+            },
+            # Restrict to AZs that actually offer the chosen GPU type —
+            # e.g. g5 is not offered in ap-southeast-2b. Without this
+            # Karpenter attempts launches in the unsupported AZ and enters
+            # backoff. See data.aws_ec2_instance_type_offerings.gpu.
+            # sort() pins the order — the data source returns AZs in
+            # non-deterministic order, producing spurious plan diffs.
+            {
+              key      = "topology.kubernetes.io/zone"
+              operator = "In"
+              values   = sort(data.aws_ec2_instance_type_offerings.gpu.locations)
             }
           ]
           nodeClassRef = {
@@ -278,13 +159,15 @@ resource "kubectl_manifest" "karpenter_gpu_provisioner" {
           ]
         }
       }
+      disruption = {
+        consolidationPolicy = "WhenEmpty"
+        consolidateAfter    = var.karpenter_consolidate_after
+      }
       limits = {
-        "nvidia.com/gpu" = 4
+        "nvidia.com/gpu" = var.gpu_node_max
       }
     }
   })
 
-  depends_on = [
-    kubectl_manifest.karpenter_gpu_nodeclass
-  ]
+  depends_on = [kubectl_manifest.karpenter_gpu_nodeclass]
 }

@@ -61,6 +61,28 @@ variable "gpu_node_desired" {
 }
 
 # -----------------------------------------------------------------------------
+# Karpenter (CPU + GPU inference NodePools)
+# -----------------------------------------------------------------------------
+
+variable "karpenter_version" {
+  description = "Karpenter chart + CRD version"
+  type        = string
+  default     = "1.6.3"
+}
+
+variable "karpenter_capacity_type" {
+  description = "Karpenter capacity type: 'on-demand' or 'spot'"
+  type        = string
+  default     = "on-demand"
+}
+
+variable "karpenter_consolidate_after" {
+  description = "How long a Karpenter node must be empty before consolidation"
+  type        = string
+  default     = "600s"
+}
+
+# -----------------------------------------------------------------------------
 # Cluster Autoscaler (CAS) behaviour
 # -----------------------------------------------------------------------------
 

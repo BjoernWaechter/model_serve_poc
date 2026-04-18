@@ -7,10 +7,6 @@ data "aws_availability_zones" "available" {
 
 data "aws_caller_identity" "current" {}
 
-data "aws_ecrpublic_authorization_token" "token" {
-  provider = aws.us_east_1 # ECR Public is always us-east-1
-}
-
 # Discover which AZs actually offer the chosen GPU instance type so Karpenter
 # NodePool AZ requirements can be restricted to supported zones only.
 # e.g. g5 is not offered in ap-southeast-2b, and without this filter Karpenter

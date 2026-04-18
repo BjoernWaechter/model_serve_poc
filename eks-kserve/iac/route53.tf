@@ -69,3 +69,28 @@ resource "aws_route53_record" "kserve_wildcard" {
     evaluate_target_health = false
   }
 }
+
+# Canonical ALB hosted zone ID for this region. Lives at the root (not
+# inside module.mlflow) so Terraform reads it at plan time — module-local
+# data sources get deferred to apply, producing spurious "known after apply"
+# diffs on the alias zone_id.
+data "aws_lb_hosted_zone_id" "alb" {}
+
+# MLflow lives on its own ALB (provisioned by the LBC from the module's
+# Ingress), separate from the Istio NLB that handles KServe traffic.
+# The module's Ingress waits for LB reconciliation, so the alias target is
+# guaranteed to be set by the time this record is created.
+resource "aws_route53_record" "mlflow" {
+  count = var.install_mlflow ? 1 : 0
+
+  zone_id         = data.aws_route53_zone.main.zone_id
+  name            = "mlflow.${local.public_domain}"
+  type            = "A"
+  allow_overwrite = true
+
+  alias {
+    name                   = module.mlflow[0].alb_dns_name
+    zone_id                = data.aws_lb_hosted_zone_id.alb.id
+    evaluate_target_health = false
+  }
+}

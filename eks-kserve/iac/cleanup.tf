@@ -3,7 +3,15 @@
 # load balancers, EFS mount targets, and autoscaled instances block VPC
 # subnet and security-group deletion.
 resource "null_resource" "cleanup_before_destroy" {
-  depends_on = [module.eks]
+  # Must depend on the AWS Load Balancer Controller so the destroy-time
+  # provisioner runs *before* the controller is uninstalled. Otherwise the
+  # controller can't deprovision the NLB + its tagged security groups
+  # (k8s-traffic-*, k8s-<ns>-<svc>-*), and those SGs orphan into the VPC and
+  # block subnet/VPC deletion.
+  depends_on = [
+    module.eks,
+    helm_release.aws_lb_controller,
+  ]
 
   triggers = {
     cluster_name = var.cluster_name
@@ -64,41 +72,93 @@ resource "null_resource" "cleanup_before_destroy" {
       $KUBECTL delete pvc --all --all-namespaces --timeout=60s || true
 
       echo "=== Deleting LoadBalancer services (releases NLB ENIs) ==="
+      # Delete Services while the AWS Load Balancer Controller is still
+      # running — the controller is what deprovisions the NLB *and* its
+      # associated security groups (k8s-traffic-<cluster>-* shared backend SG
+      # and k8s-<ns>-<svc>-* frontend SG, both tagged elbv2.k8s.aws/cluster).
+      # Bypassing the controller leaves those SGs orphaned and blocks VPC
+      # deletion — prefer controller-driven teardown, fall back to direct
+      # AWS API calls only if the controller fails to finish in time.
+      #
+      # NLB deprovisioning takes 3–5 min; kubectl's --timeout is how long it
+      # waits for the Service object itself (blocked by the LBC's finalizer
+      # until the NLB is gone). Give it enough headroom.
       $KUBECTL delete svc --field-selector spec.type=LoadBalancer \
-        --all-namespaces --timeout=120s || true
+        --all-namespaces --timeout=600s || true
 
-      # Fallback: delete NLBs via AWS API in case the LB controller is already
-      # gone and couldn't deprovision them. Finds load balancers whose ENIs
-      # live in the VPC.
-      echo "=== Deleting remaining load balancers in VPC via AWS API ==="
-      LB_ARNS=$(aws elbv2 describe-load-balancers \
-        --region ${self.triggers.region} \
-        --query "LoadBalancers[].LoadBalancerArn" --output text)
-      for arn in $LB_ARNS; do
-        LB_VPC=$(aws elbv2 describe-load-balancers \
+      echo "Waiting for LBC-managed NLBs to be deprovisioned..."
+      NLB_GONE=0
+      for i in $(seq 1 60); do
+        LB_ARNS=$(aws elbv2 describe-load-balancers \
           --region ${self.triggers.region} \
-          --load-balancer-arns "$arn" \
-          --query "LoadBalancers[0].VpcId" --output text 2>/dev/null)
-        if [ "$LB_VPC" = "${self.triggers.vpc_id}" ]; then
-          echo "Deleting load balancer $arn"
+          --query "LoadBalancers[].LoadBalancerArn" --output text)
+        LEFTOVER=""
+        for arn in $LB_ARNS; do
+          CLUSTER_TAG=$(aws elbv2 describe-tags \
+            --region ${self.triggers.region} \
+            --resource-arns "$arn" \
+            --query "TagDescriptions[0].Tags[?Key=='elbv2.k8s.aws/cluster'].Value | [0]" \
+            --output text)
+          if [ "$CLUSTER_TAG" = "${self.triggers.cluster_name}" ]; then
+            LEFTOVER="$LEFTOVER $arn"
+          fi
+        done
+        if [ -z "$LEFTOVER" ]; then
+          echo "All LBC-managed load balancers deprovisioned"
+          NLB_GONE=1
+          break
+        fi
+        echo "LBs still present ($i/60):$LEFTOVER"
+        sleep 10
+      done
+
+      if [ "$NLB_GONE" != "1" ]; then
+        echo "=== LBC failed to deprovision NLBs in time — force-deleting ==="
+        # Fallback only. This leaves LBC-managed SGs orphaned; the block
+        # below sweeps them up via direct API calls.
+        for arn in $LEFTOVER; do
+          echo "Force-deleting $arn"
           aws elbv2 delete-load-balancer \
             --region ${self.triggers.region} \
             --load-balancer-arn "$arn" || true
-        fi
-      done
+        done
+        echo "Waiting for NLB ENIs to detach..."
+        for i in $(seq 1 30); do
+          ENIS=$(aws ec2 describe-network-interfaces \
+            --region ${self.triggers.region} \
+            --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" \
+                      "Name=interface-type,Values=network_load_balancer" \
+            --query "NetworkInterfaces[].NetworkInterfaceId" --output text)
+          if [ -z "$ENIS" ]; then
+            echo "All NLB ENIs released"
+            break
+          fi
+          echo "NLB ENIs still present ($i/30): $ENIS"
+          sleep 10
+        done
+      fi
 
-      # Wait for NLB ENIs to detach
-      echo "Waiting for load balancer ENIs to release..."
-      for i in $(seq 1 12); do
-        ENIS=$(aws ec2 describe-network-interfaces \
+      echo "Waiting for LBC-managed security groups to be deleted..."
+      for i in $(seq 1 60); do
+        SGS=$(aws ec2 describe-security-groups \
           --region ${self.triggers.region} \
-          --filters "Name=vpc-id,Values=${self.triggers.vpc_id}" "Name=association.public-ip,Values=*" \
-          --query "NetworkInterfaces[].NetworkInterfaceId" --output text)
-        if [ -z "$ENIS" ]; then
-          echo "All public IPs released"
+          --filters "Name=tag:elbv2.k8s.aws/cluster,Values=${self.triggers.cluster_name}" \
+          --query "SecurityGroups[].GroupId" --output text)
+        if [ -z "$SGS" ]; then
+          echo "All LBC-managed security groups deleted"
           break
         fi
-        echo "ENIs still attached ($i/12): $ENIS"
+        echo "SGs still present ($i/60): $SGS"
+        # If NLBs were force-deleted, the LBC won't come back to clean up
+        # the SGs — try to delete them directly. Harmless if the LBC is
+        # still working on them (delete will just fail with DependencyViolation).
+        if [ "$NLB_GONE" != "1" ]; then
+          for sg in $SGS; do
+            aws ec2 delete-security-group \
+              --region ${self.triggers.region} \
+              --group-id "$sg" 2>/dev/null || true
+          done
+        fi
         sleep 10
       done
 

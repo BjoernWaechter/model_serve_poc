@@ -7,14 +7,13 @@ module "vpc" {
 
   azs = slice(data.aws_availability_zones.available.names, 0, 3)
 
-  # Private subnets are carved per node-group so each group's node IPs are
-  # easy to spot at a glance:
-  #   system nodes → 10.0.1x.xx   (indices 0-2)
-  #   cpu nodes    → 10.0.2x.xx   (indices 3-5)
-  #   gpu nodes    → 10.0.3x.xx   (indices 6-8)
+  # Private subnets are carved per node-group so node IPs are easy to spot at a
+  # glance:
+  #   system nodes       → 10.0.1x.xx   (indices 0-2)
+  #   cpu nodes          → 10.0.2x.xx   (indices 3-5)
+  #   gpu (Karpenter)    → 10.0.3x.xx   (indices 6-8) — tagged karpenter.sh/discovery
   # The VPC module spreads subnets across the AZ list by index-mod-AZ-count,
-  # so slot 0/3/6 → AZ-a, 1/4/7 → AZ-b, 2/5/8 → AZ-c. Keep the ordering stable
-  # — eks.tf slices this list into per-node-group subnet_ids by index.
+  # so slot 0/3/6 → AZ-a, 1/4/7 → AZ-b, 2/5/8 → AZ-c.
   private_subnets = [
     "10.0.10.0/24", # system   AZ-a
     "10.0.11.0/24", # system   AZ-b
@@ -22,7 +21,7 @@ module "vpc" {
     "10.0.20.0/24", # cpu      AZ-a
     "10.0.21.0/24", # cpu      AZ-b
     "10.0.22.0/24", # cpu      AZ-c
-    "10.0.30.0/24", # gpu      AZ-a  (eks.tf filters to AZs where GPU type is offered)
+    "10.0.30.0/24", # gpu      AZ-a  (Karpenter selects by AZ + discovery tag)
     "10.0.31.0/24", # gpu      AZ-b
     "10.0.32.0/24", # gpu      AZ-c
   ]
@@ -45,11 +44,10 @@ module "vpc" {
 
   enable_nat_gateway     = true
   single_nat_gateway     = false
-  one_nat_gateway_per_az = true # 3 NATs (1 per AZ) regardless of subnet count — set single_nat_gateway=true in non-prod to cut to 1
+  one_nat_gateway_per_az = true
   enable_dns_hostnames   = true
   enable_dns_support     = true
 
-  # Required tags for EKS to discover subnets
   public_subnet_tags = {
     "kubernetes.io/role/elb"                    = 1
     "kubernetes.io/cluster/${var.cluster_name}" = "shared"
@@ -60,22 +58,14 @@ module "vpc" {
   }
 }
 
-# Karpenter discovery tags. Each inference NodePool's EC2NodeClass filters
-# subnets by the tag value below so CPU nodes land in 10.0.2x.xx and GPU
-# nodes in 10.0.3x.xx. The system MNG stays pinned to 10.0.1x.xx via eks.tf
-# and is unaffected by these tags.
-resource "aws_ec2_tag" "karpenter_cpu_subnet" {
-  for_each = { for i, sid in slice(module.vpc.private_subnets, 3, 6) : i => sid }
-
-  resource_id = each.value
-  key         = "karpenter.sh/discovery"
-  value       = "${var.cluster_name}-cpu"
-}
-
+# Tag only the GPU-designated subnets (indices 6-8, 10.0.3x.xx) with
+# karpenter.sh/discovery so Karpenter provisions GPU nodes exclusively into
+# that slice. The managed system/cpu node groups pin to their own subnet
+# slices via eks.tf, so the tag does not affect them.
 resource "aws_ec2_tag" "karpenter_gpu_subnet" {
   for_each = { for i, sid in slice(module.vpc.private_subnets, 6, 9) : i => sid }
 
   resource_id = each.value
   key         = "karpenter.sh/discovery"
-  value       = "${var.cluster_name}-gpu"
+  value       = var.cluster_name
 }

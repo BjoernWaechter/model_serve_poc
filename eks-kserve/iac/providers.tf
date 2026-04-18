@@ -1,6 +1,16 @@
 provider "aws" {
   region = var.aws_region
   default_tags { tags = var.tags }
+
+  # Karpenter's subnet/SG discovery tags are written by aws_ec2_tag resources
+  # outside the VPC module's view (see vpc.tf). Without this, the VPC module
+  # and aws_ec2_tag oscillate on every plan — the VPC module tries to remove
+  # the tag it doesn't know about, cascading through module.eks's data
+  # sources and producing spurious replace plans on IAM role attachments,
+  # access entries, and KMS policies.
+  ignore_tags {
+    keys = ["karpenter.sh/discovery"]
+  }
 }
 
 # ECR Public requires us-east-1

@@ -48,3 +48,18 @@ output "iris_url" {
   description = "Public URL for the sklearn iris inference service"
   value       = "http://iris.kserve.${local.public_domain}/v1/models/iris:predict"
 }
+
+output "mlflow_url" {
+  description = "Public MLflow URL (null when install_mlflow=false)"
+  value       = var.install_mlflow ? "http://mlflow.${local.public_domain}/" : null
+}
+
+output "mlflow_admin_user" {
+  description = "MLflow admin username"
+  value       = try(nonsensitive(module.mlflow[0].admin_user), "")
+}
+
+output "mlflow_admin_password" {
+  description = "MLflow admin password"
+  value       = try(nonsensitive(module.mlflow[0].admin_password), "")
+}

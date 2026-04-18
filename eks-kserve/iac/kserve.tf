@@ -37,6 +37,49 @@ locals {
     for k, v in data.kubectl_file_documents.kserve.manifests : k => v
     if !anytrue([for name in local.kserve_excluded : strcontains(v, "name: ${name}")])
   }
+
+  # Pin the KServe controller deployment to the system MNG. Upstream kserve.yaml
+  # ships without a CriticalAddonsOnly toleration, so on a cluster whose only
+  # non-inference nodes carry that taint the controller is unschedulable.
+  kserve_manifests = {
+    for k, v in local.kserve_filtered : k => (
+      try(yamldecode(v).kind, "") == "Deployment"
+        ? yamlencode(merge(
+            yamldecode(v),
+            {
+              spec = merge(
+                yamldecode(v).spec,
+                {
+                  template = merge(
+                    yamldecode(v).spec.template,
+                    {
+                      spec = merge(
+                        yamldecode(v).spec.template.spec,
+                        {
+                          nodeSelector = merge(
+                            try(yamldecode(v).spec.template.spec.nodeSelector, {}),
+                            { role = "system" }
+                          )
+                          tolerations = concat(
+                            try(yamldecode(v).spec.template.spec.tolerations, []),
+                            [{
+                              key      = "CriticalAddonsOnly"
+                              operator = "Equal"
+                              value    = "true"
+                              effect   = "NoSchedule"
+                            }]
+                          )
+                        }
+                      )
+                    }
+                  )
+                }
+              )
+            }
+          ))
+        : v
+    )
+  }
 }
 
 # Pre-create the kserve namespace so namespaced resources in kserve.yaml
@@ -56,7 +99,7 @@ resource "kubectl_manifest" "kserve_ns" {
 }
 
 resource "kubectl_manifest" "kserve" {
-  for_each          = local.kserve_filtered
+  for_each          = local.kserve_manifests
   yaml_body         = each.value
   server_side_apply = true
   force_conflicts   = true
