@@ -53,6 +53,12 @@ resource "helm_release" "argocd" {
         params = {
           "server.insecure" = true
         }
+        # Poll tracked git repos every 60s instead of the 180s default — fine
+        # for a small cluster with one repo; lower than this risks GitHub's
+        # secondary rate limits when running unauthenticated.
+        cm = {
+          "timeout.reconciliation" = "60s"
+        }
       }
 
       server = {
@@ -124,6 +130,34 @@ resource "kubernetes_ingress_v1" "argocd" {
         }
       }
     }
+  }
+
+  depends_on = [helm_release.argocd]
+}
+
+# GitHub repo credential — picked up by Argo CD via the
+# `argocd.argoproj.io/secret-type: repo-creds` label. Applies to every
+# Application whose repoURL starts with `argocd_github_url_prefix`.
+resource "kubernetes_secret" "argocd_github_creds" {
+  count = var.install_argocd && var.argocd_github_pat != "" && var.argocd_github_url_prefix != "" ? 1 : 0
+
+  metadata {
+    name      = "github-creds"
+    namespace = kubernetes_namespace.argocd[0].metadata[0].name
+
+    labels = {
+      "argocd.argoproj.io/secret-type" = "repo-creds"
+      "app.kubernetes.io/managed-by"   = "terraform"
+    }
+  }
+
+  type = "Opaque"
+
+  data = {
+    type     = "git"
+    url      = var.argocd_github_url_prefix
+    username = "not-used" # GitHub ignores the username when a PAT is the password
+    password = var.argocd_github_pat
   }
 
   depends_on = [helm_release.argocd]

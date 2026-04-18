@@ -98,6 +98,24 @@ variable "argocd_chart_version" {
   default     = "9.5.2"
 }
 
+# GitHub repo credentials for Argo CD. Optional — leave empty for public-repo,
+# unauthenticated access. Setting these avoids GitHub's stricter unauthenticated
+# rate limits (and is required for private repos). The PAT only needs `repo:read`
+# (or `public_repo` for public-only). Stored as a labeled k8s Secret that Argo CD
+# picks up declaratively, so the PAT does not end up in the Helm release object.
+variable "argocd_github_url_prefix" {
+  description = "URL prefix the github-creds apply to (e.g. https://github.com/your-org). Any Application repoURL under this prefix uses the credential."
+  type        = string
+  default     = ""
+}
+
+variable "argocd_github_pat" {
+  description = "GitHub Personal Access Token used by Argo CD to authenticate git fetches. Leave empty to skip creating the credential."
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "tags" {
   description = "Common tags applied to all resources"
   type        = map(string)

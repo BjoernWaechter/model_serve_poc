@@ -8,3 +8,9 @@
 # The domain name itself is read from the zone at plan/apply time, so you
 # don't need to set it here.
 route53_zone_id = "ZXXXXXXXXXXXXX"
+
+# Optional: GitHub credentials for Argo CD. Leave both empty to fall back to
+# unauthenticated public-repo access (subject to GitHub's stricter rate limits).
+# PAT scope needed: `repo` for private repos, `public_repo` for public-only.
+# argocd_github_url_prefix = "https://github.com/your-org"
+# argocd_github_pat        = "ghp_xxxxxxxxxxxxxxxxxxxx"
