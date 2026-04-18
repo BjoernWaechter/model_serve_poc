@@ -15,6 +15,12 @@
 terraform {
   required_version = ">= 1.5.0"
 
+  backend "s3" {
+    bucket = "terraform-state-768871556035"
+    key    = "eks-kserve-cluster"
+    region = "ap-southeast-2"
+  }
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"

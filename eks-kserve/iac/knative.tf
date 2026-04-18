@@ -305,7 +305,24 @@ resource "null_resource" "knative_activator_restart" {
   }
 
   provisioner "local-exec" {
-    command = "kubectl --context=$(kubectl config current-context) rollout restart deployment/activator -n knative-serving && kubectl --context=$(kubectl config current-context) rollout status deployment/activator -n knative-serving --timeout=120s"
+    command = <<-EOT
+      CA_FILE=$(mktemp)
+      echo "$CA_DATA" | base64 -d > "$CA_FILE"
+      trap "rm -f $CA_FILE" EXIT
+
+      TOKEN=$(aws eks get-token --cluster-name "$CLUSTER_NAME" --region "$REGION" --output json | jq -r '.status.token')
+      K="kubectl --server=$ENDPOINT --certificate-authority=$CA_FILE --token=$TOKEN"
+
+      $K rollout restart deployment/activator -n knative-serving
+      $K rollout status  deployment/activator -n knative-serving --timeout=120s
+    EOT
+
+    environment = {
+      CLUSTER_NAME = module.eks.cluster_name
+      REGION       = var.aws_region
+      ENDPOINT     = module.eks.cluster_endpoint
+      CA_DATA      = module.eks.cluster_certificate_authority_data
+    }
   }
 
   depends_on = [kubernetes_config_map_v1_data.knative_config_defaults]

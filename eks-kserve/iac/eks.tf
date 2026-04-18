@@ -9,6 +9,20 @@ module "eks" {
 
   cluster_endpoint_public_access = true # Restrict to your CIDR in production
 
+  access_entries = {
+    principal = {
+      principal_arn = "arn:aws:iam::768871556035:user/temp_admin"
+      policy_associations = {
+        cluster_admin = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = {
+            type = "cluster"
+          }
+        }
+      }
+    }
+  }
+
   vpc_id                   = module.vpc.vpc_id
   subnet_ids               = module.vpc.private_subnets
   control_plane_subnet_ids = module.vpc.private_subnets

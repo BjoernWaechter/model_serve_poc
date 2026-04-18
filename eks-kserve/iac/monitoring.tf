@@ -95,6 +95,52 @@ resource "helm_release" "kube_prometheus_stack" {
                   target_label  = "model"
                 }
               ]
+            },
+            # Knative activator metrics — shows request buffering during
+            # scale-from-zero (activator_request_concurrency, _count, _latencies).
+            # Safe to scrape: runs in knative-serving, not in model pods.
+            {
+              job_name        = "knative-activator"
+              scrape_interval = "5s"
+              kubernetes_sd_configs = [{
+                role = "pod"
+                namespaces = { names = ["knative-serving"] }
+              }]
+              relabel_configs = [
+                {
+                  source_labels = ["__meta_kubernetes_pod_label_app"]
+                  action        = "keep"
+                  regex         = "activator"
+                },
+                {
+                  source_labels = ["__meta_kubernetes_pod_container_port_number"]
+                  action        = "keep"
+                  regex         = "9090"
+                }
+              ]
+            },
+            # Knative autoscaler metrics — shows scaling decisions
+            # (autoscaler_desired_pods, _actual_pods, _not_ready_pods,
+            # _panic_request_concurrency, _stable_request_concurrency).
+            {
+              job_name        = "knative-autoscaler"
+              scrape_interval = "5s"
+              kubernetes_sd_configs = [{
+                role = "pod"
+                namespaces = { names = ["knative-serving"] }
+              }]
+              relabel_configs = [
+                {
+                  source_labels = ["__meta_kubernetes_pod_label_app"]
+                  action        = "keep"
+                  regex         = "autoscaler"
+                },
+                {
+                  source_labels = ["__meta_kubernetes_pod_container_port_number"]
+                  action        = "keep"
+                  regex         = "9090"
+                }
+              ]
             }
           ]
         }

@@ -67,13 +67,13 @@ variable "gpu_node_desired" {
 variable "cas_scale_down_delay_after_add" {
   description = "How long CAS waits after a scale-up before considering scale-down (e.g. \"5m\")"
   type        = string
-  default     = "5m"
+  default     = "2m"
 }
 
 variable "cas_scale_down_unneeded_time" {
   description = "How long a node must be unneeded before CAS removes it (e.g. \"5m\")"
   type        = string
-  default     = "5m"
+  default     = "2m"
 }
 
 variable "cas_scale_down_utilization_threshold" {

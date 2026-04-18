@@ -22,6 +22,10 @@ Usage:
   .venv/bin/python ./test_inference_gpu_coldstart.py --force-cold    # delete existing pods
   .venv/bin/python ./test_inference_gpu_coldstart.py --wait-zero 180 # wait up to 180s for
                                                                      # Knative to scale to 0
+  .venv/bin/python ./test_inference_gpu_coldstart.py --num-requests 5 # send 5 concurrent
+                                                                      # requests as trigger
+  .venv/bin/python ./test_inference_gpu_coldstart.py --num-requests 2500 --send-delay-ms 10
+                                                      # stagger sends at 10ms apart
 
 Or activate the venv first (`source .venv/bin/activate`) and call the script
 directly.
@@ -30,6 +34,7 @@ directly.
 from __future__ import annotations
 
 import argparse
+import asyncio
 import datetime as dt
 import json
 import os
@@ -43,7 +48,7 @@ from pathlib import Path
 from typing import Any
 
 try:
-    import requests as _requests_check  # noqa: F401
+    import aiohttp as _aiohttp_check  # noqa: F401
     from rich import box
     from rich.console import Console
     from rich.panel import Panel
@@ -52,14 +57,14 @@ try:
 except ImportError:
     _here = Path(__file__).resolve().parent
     sys.stderr.write(
-        "This script requires 'rich' and 'requests'. Set up the local venv:\n"
+        "This script requires 'rich' and 'aiohttp'. Set up the local venv:\n"
         f"  cd {_here}\n"
         "  python3 -m venv .venv\n"
         "  .venv/bin/pip install -r requirements.txt\n"
         "  .venv/bin/python " + Path(__file__).name + "\n"
     )
     sys.exit(2)
-import requests
+import aiohttp
 
 console = Console()
 
@@ -72,13 +77,9 @@ LABEL = f"serving.kserve.io/inferenceservice={ISVC}"
 GPU_NODE_SELECTOR = "inference/type=gpu"  # only GPU inference nodes
 DEVICE_PLUGIN_LABEL = "app=nvidia-device-plugin-daemonset"
 
-CHAT_PAYLOAD = {
-    "model": "model",
-    "messages": [{"role": "user", "content": "Explain a Hopper in NZ in 200 words"}],
-    "max_tokens": 100,
-}
+QUESTIONS_FILE = Path(__file__).resolve().parent / "sample_questions.json"
 
-REQUEST_TIMEOUT = 600  # seconds
+REQUEST_TIMEOUT = 900  # seconds
 WATCH_INTERVAL = 3   # seconds — purely cosmetic live status
 
 ARTEFACT_DIR = Path("/tmp")
@@ -90,6 +91,26 @@ RESULT_JSON = ARTEFACT_DIR / "kserve_coldstart_result.json"
 # ---------------------------------------------------------------------------
 # Small helpers
 # ---------------------------------------------------------------------------
+def load_questions() -> list[str]:
+    """Load sample questions from the JSON file next to this script."""
+    if not QUESTIONS_FILE.exists():
+        sys.exit(f"questions file not found: {QUESTIONS_FILE}")
+    with QUESTIONS_FILE.open() as f:
+        questions = json.load(f)
+    if not questions:
+        sys.exit(f"questions file is empty: {QUESTIONS_FILE}")
+    return questions
+
+
+def chat_payload(question: str) -> dict[str, Any]:
+    """Build a chat-completion request payload for the given question."""
+    return {
+        "model": "model",
+        "messages": [{"role": "user", "content": question}],
+        "max_tokens": 100,
+    }
+
+
 def require_binaries(*bins: str) -> None:
     missing = [b for b in bins if shutil.which(b) is None]
     if missing:
@@ -107,17 +128,30 @@ def run(cmd: list[str], *, check: bool = True, capture: bool = True,
     )
 
 
+KUBECTL_TIMEOUT = 10  # seconds — fail fast on DNS/connectivity issues
+
 def kubectl_json(*args: str) -> dict[str, Any]:
     """Run kubectl ... -o json and parse the result. Returns {} on failure."""
+    cmd = ["kubectl", *args, "-o", "json"]
     try:
-        out = run(["kubectl", *args, "-o", "json"], check=False)
-    except FileNotFoundError:
+        out = run(cmd, check=False, timeout=KUBECTL_TIMEOUT)
+    except subprocess.TimeoutExpired:
+        console.print(f"[dim]kubectl timed out ({KUBECTL_TIMEOUT}s): {' '.join(args[:3])}…[/dim]")
         return {}
-    if out.returncode != 0 or not out.stdout.strip():
+    except FileNotFoundError:
+        console.print(f"[red]kubectl not found[/red]")
+        return {}
+    if out.returncode != 0:
+        stderr = (out.stderr or "").strip()
+        if stderr:
+            console.print(f"[dim]kubectl failed (rc={out.returncode}): {stderr}[/dim]")
+        return {}
+    if not out.stdout.strip():
         return {}
     try:
         return json.loads(out.stdout)
     except json.JSONDecodeError:
+        console.print(f"[dim]kubectl returned invalid JSON for: {' '.join(args)}[/dim]")
         return {}
 
 
@@ -180,14 +214,14 @@ def get_terraform_url() -> str:
 class Watcher(threading.Thread):
     def __init__(self) -> None:
         super().__init__(daemon=True)
-        self._stop = threading.Event()
+        self._stop_event = threading.Event()
         WATCH_LOG.write_text("")
 
     def stop(self) -> None:
-        self._stop.set()
+        self._stop_event.set()
 
     def run(self) -> None:
-        while not self._stop.is_set():
+        while not self._stop_event.is_set():
             ts = dt.datetime.now().strftime("%H:%M:%S")
             pods = run(
                 ["kubectl", "get", "pod", "-n", NS, "-l", LABEL,
@@ -206,11 +240,11 @@ class Watcher(threading.Thread):
                     f.write(f"[{ts}] pods:\n")
                     for line in pods.splitlines():
                         f.write(f"    {line}\n")
-            self._stop.wait(WATCH_INTERVAL)
+            self._stop_event.wait(WATCH_INTERVAL)
 
 
 # ---------------------------------------------------------------------------
-# HTTP request via requests library
+# HTTP request via aiohttp (async, single event loop, cheap concurrency)
 # ---------------------------------------------------------------------------
 @dataclass
 class HttpResult:
@@ -221,26 +255,106 @@ class HttpResult:
     body: str = ""
 
 
-def fire_request(url: str) -> tuple[dt.datetime, dt.datetime, HttpResult]:
+async def fire_request(session: aiohttp.ClientSession, url: str,
+                       payload: dict[str, Any]) -> tuple[dt.datetime, dt.datetime, HttpResult]:
     res = HttpResult()
     t0 = dt.datetime.now(dt.timezone.utc)
     try:
-        resp = requests.post(
+        async with session.post(
             url,
-            json=CHAT_PAYLOAD,
-            timeout=REQUEST_TIMEOUT,
+            json=payload,
             headers={"Content-Type": "application/json"},
-        )
+        ) as resp:
+            body = await resp.text()
+            t1 = dt.datetime.now(dt.timezone.utc)
+            wall = (t1 - t0).total_seconds()
+            res.http_code = str(resp.status)
+            res.total = wall
+            res.ttfb = wall
+            res.body = body
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         t1 = dt.datetime.now(dt.timezone.utc)
-        res.http_code = str(resp.status_code)
-        res.total = resp.elapsed.total_seconds()
-        res.ttfb = resp.elapsed.total_seconds()
-        res.body = resp.text
-        RESPONSE_FILE.write_text(resp.text)
-    except requests.RequestException as exc:
-        t1 = dt.datetime.now(dt.timezone.utc)
-        res.error = str(exc)
+        res.error = str(exc) or type(exc).__name__
     return t0, t1, res
+
+
+async def _run_requests(
+    *,
+    url: str,
+    num_requests: int,
+    send_delay: float,
+    questions: list[str],
+    idle_timeout: int,
+    all_results: list[tuple[int, dt.datetime, dt.datetime, HttpResult]],
+    all_errors: list[BaseException],
+) -> tuple[float, bool, int]:
+    """Drive all requests on a single asyncio event loop.
+
+    Returns (start_mono, idle_stopped, pending_on_stop). Populates
+    all_results and all_errors in-place so the caller can still reason
+    about them after we return.
+    """
+    connector = aiohttp.TCPConnector(limit=0, limit_per_host=0)
+    timeout = aiohttp.ClientTimeout(total=REQUEST_TIMEOUT)
+
+    async with aiohttp.ClientSession(connector=connector, timeout=timeout) as session:
+        async def _do_one(idx: int) -> None:
+            try:
+                question = questions[idx % len(questions)]
+                t0_r, t1_r, res = await fire_request(session, url, chat_payload(question))
+                all_results.append((idx, t0_r, t1_r, res))
+            except asyncio.CancelledError:
+                raise
+            except BaseException as exc:  # noqa: BLE001
+                all_errors.append(exc)
+
+        start_mono = time.monotonic()
+        tasks: list[asyncio.Task[None]] = []
+        for i in range(num_requests):
+            tasks.append(asyncio.create_task(_do_one(i)))
+            if send_delay > 0 and i < num_requests - 1:
+                await asyncio.sleep(send_delay)
+
+        last_answered = 0
+        last_progress_mono: float | None = None
+        idle_stopped = False
+
+        with console.status("", spinner="dots") as status:
+            while any(not t.done() for t in tasks):
+                elapsed = time.monotonic() - start_mono
+                done = len(all_results) + len(all_errors)
+                # Only HTTP responses count as "answered". Connection errors
+                # do not reset the idle clock.
+                answered = sum(1 for r in all_results if r[3].http_code)
+                now = time.monotonic()
+                if answered > last_answered:
+                    last_answered = answered
+                    last_progress_mono = now
+                if (idle_timeout > 0 and last_progress_mono is not None
+                        and now - last_progress_mono > idle_timeout):
+                    idle_stopped = True
+                    status.update(
+                        f"[yellow]Idle timeout: no HTTP response for "
+                        f"{idle_timeout}s[/yellow] — "
+                        f"{answered}/{num_requests} answered, stopping."
+                    )
+                    break
+                status.update(
+                    f"[cyan]Sending {num_requests} request(s)[/cyan] — "
+                    f"{done}/{num_requests} done ({answered} answered), "
+                    f"{elapsed:5.1f}s elapsed (max {REQUEST_TIMEOUT}s)…"
+                )
+                await asyncio.sleep(0.5)
+
+        pending = sum(1 for t in tasks if not t.done())
+        if idle_stopped:
+            for t in tasks:
+                if not t.done():
+                    t.cancel()
+            # Let cancellations propagate cleanly before the session closes.
+            await asyncio.gather(*tasks, return_exceptions=True)
+
+        return start_mono, idle_stopped, pending
 
 
 # ---------------------------------------------------------------------------
@@ -402,13 +516,30 @@ def force_cold_start() -> None:
         time.sleep(2)
 
 
-def wait_for_zero(seconds: int) -> None:
-    print(f"--- --wait-zero: waiting up to {seconds}s for Knative to scale to 0 ---")
+def wait_for_zero(seconds: int) -> bool:
+    """Wait until both pods AND GPU nodes have scaled to zero.
+
+    Returns True if zero was reached before the deadline, False on timeout.
+    """
+    print(f"--- --wait-zero: waiting up to {seconds}s for pods + GPU nodes to scale to 0 ---")
     deadline = time.monotonic() + seconds
+    next_log = time.monotonic()  # print immediately on first iteration
+    pods_gone = False
     while time.monotonic() < deadline:
-        if not list_pod_uids():
-            return
+        pods = list_pod_uids()
+        nodes = list_node_uids()
+        remaining = int(deadline - time.monotonic())
+        if not pods and not pods_gone:
+            print("    pods are gone, waiting for GPU nodes to drain…")
+            pods_gone = True
+        if not pods and not nodes:
+            print("    GPU nodes are gone — true cold state reached.")
+            return True
+        if time.monotonic() >= next_log:
+            print(f"    pods={len(pods)} gpu_nodes={len(nodes)} ({remaining}s left)")
+            next_log = time.monotonic() + 15
         time.sleep(5)
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -722,9 +853,28 @@ def main() -> int:
                     help="delete existing pods to force a true cold start")
     ap.add_argument("--wait-zero", type=int, default=0, metavar="SECONDS",
                     help="wait up to N seconds for Knative to scale to 0 first")
+    ap.add_argument("--num-requests", type=int, default=1, metavar="N",
+                    help="send N concurrent requests as scaleup trigger (default: 1)")
+    ap.add_argument("--send-delay-ms", type=int, default=0, metavar="MS",
+                    help="delay in milliseconds between launching each request (default: 0)")
+    ap.add_argument("--idle-timeout", type=int, default=30, metavar="SECONDS",
+                    help="stop waiting once no new response has arrived for N "
+                         "seconds (measured from the last response; default: 30, "
+                         "0 disables)")
     args = ap.parse_args()
 
     require_binaries("kubectl", "terraform")
+
+    # Fail fast if kubectl can't reach the cluster
+    try:
+        probe = run(["kubectl", "cluster-info"], check=False, timeout=KUBECTL_TIMEOUT)
+        if probe.returncode != 0:
+            stderr = (probe.stderr or "").strip()
+            console.print(f"[bold red]kubectl cannot reach the cluster:[/bold red]\n{stderr}")
+            return 1
+    except subprocess.TimeoutExpired:
+        console.print(f"[bold red]kubectl timed out ({KUBECTL_TIMEOUT}s) — cluster unreachable[/bold red]")
+        return 1
 
     url = get_terraform_url()
     console.rule("[bold]KServe GPU cold-start measurement[/bold]")
@@ -733,20 +883,41 @@ def main() -> int:
     console.print(f"Service:   {ISVC}")
     console.print()
 
-    existing = list_pod_uids()
-    console.print(f"Existing {ISVC} pods: {len(existing)}")
+    existing_pods = list_pod_uids()
+    existing_gpu_nodes = list_node_uids()
+    console.print(f"Existing {ISVC} pods: {len(existing_pods)}")
+    console.print(f"Existing GPU nodes:  {len(existing_gpu_nodes)}")
 
-    if args.force_cold and existing:
+    if args.force_cold and existing_pods:
         force_cold_start()
-        existing = list_pod_uids()
-    elif args.wait_zero > 0 and existing:
-        wait_for_zero(args.wait_zero)
-        existing = list_pod_uids()
+        existing_pods = list_pod_uids()
+    elif args.wait_zero > 0 and (existing_pods or existing_gpu_nodes):
+        reached_zero = wait_for_zero(args.wait_zero)
+        existing_pods = list_pod_uids()
+        existing_gpu_nodes = list_node_uids()
+        if not reached_zero:
+            parts = []
+            if existing_pods:
+                parts.append(f"{len(existing_pods)} pod(s)")
+            if existing_gpu_nodes:
+                parts.append(f"{len(existing_gpu_nodes)} GPU node(s)")
+            console.print(
+                f"[bold red]FAIL[/bold red] --wait-zero {args.wait_zero}s expired "
+                f"with {' and '.join(parts)} still present. "
+                "Measurement would not be a cold start. "
+                "Increase --wait-zero or use --force-cold."
+            )
+            return 1
 
-    if existing:
+    if existing_pods or existing_gpu_nodes:
+        parts = []
+        if existing_pods:
+            parts.append(f"{len(existing_pods)} pod(s)")
+        if existing_gpu_nodes:
+            parts.append(f"{len(existing_gpu_nodes)} GPU node(s)")
         console.print(
-            f"[yellow]WARNING:[/yellow] {len(existing)} {ISVC} pod(s) already "
-            "running. Cold-start phases may be partial. Use [cyan]--force-cold[/cyan] "
+            f"[yellow]WARNING:[/yellow] {' and '.join(parts)} already "
+            "present. Cold-start phases may be partial. Use [cyan]--force-cold[/cyan] "
             "or [cyan]--wait-zero N[/cyan]."
         )
         console.print()
@@ -756,46 +927,92 @@ def main() -> int:
     console.print(f"Baseline inference (GPU-capable) nodes: {len(baseline_nodes)}")
     console.print()
 
+    num_requests = args.num_requests
+    questions = load_questions()
+    send_delay = args.send_delay_ms / 1000.0  # convert ms → seconds
+    console.print(f"Requests:            {num_requests}")
+    console.print(f"Send delay:          {args.send_delay_ms}ms between requests")
+    console.print(
+        f"Idle timeout:        "
+        f"{args.idle_timeout}s since last response (0 = disabled)"
+    )
+    console.print(f"Sample questions:    {len(questions)} (cycling if num_requests > {len(questions)})")
+    console.print()
+
     watcher = Watcher()
     watcher.start()
 
-    # Fire the request in a background thread so we can update the status
-    # line with a live elapsed-time counter.
-    request_result: list[tuple[dt.datetime, dt.datetime, HttpResult]] = []
-    request_error: list[BaseException] = []
+    all_results: list[tuple[int, dt.datetime, dt.datetime, HttpResult]] = []
+    all_errors: list[BaseException] = []
 
-    def _do_request() -> None:
-        try:
-            request_result.append(fire_request(url))
-        except BaseException as exc:
-            request_error.append(exc)
+    start_mono, idle_stopped, pending_on_stop = asyncio.run(
+        _run_requests(
+            url=url,
+            num_requests=num_requests,
+            send_delay=send_delay,
+            questions=questions,
+            idle_timeout=args.idle_timeout,
+            all_results=all_results,
+            all_errors=all_errors,
+        )
+    )
 
-    req_thread = threading.Thread(target=_do_request, daemon=True)
-    start_mono = time.monotonic()
-    req_thread.start()
-
-    with console.status("", spinner="dots") as status:
-        while req_thread.is_alive():
-            elapsed = time.monotonic() - start_mono
-            status.update(
-                f"[cyan]Sending request[/cyan] — "
-                f"{elapsed:5.1f}s elapsed (max {REQUEST_TIMEOUT}s)…"
-            )
-            req_thread.join(timeout=0.5)
+    if idle_stopped:
+        console.print(
+            f"[yellow]Stopped early: no response in {args.idle_timeout}s; "
+            f"{pending_on_stop} request(s) still in flight (abandoned).[/yellow]"
+        )
 
     watcher.stop()
     watcher.join(timeout=2)
 
-    if request_error:
-        raise request_error[0]
-    t0, t1, http_res = request_result[0]
+    if all_errors and not all_results:
+        raise all_errors[0]
+
+    # Sort by send time; use the first-sent as the primary for timeline
+    all_results.sort(key=lambda r: r[1])
+    _, t0, t1, http_res = all_results[0]
+
+    # Write every response body to the artefact file (one entry per request).
+    def _decode_body(b: str) -> Any:
+        if not b:
+            return None
+        try:
+            return json.loads(b)
+        except json.JSONDecodeError:
+            return b
+
+    response_entries = [
+        {
+            "idx": idx,
+            "t0": r_t0.isoformat(),
+            "t1": r_t1.isoformat(),
+            "wall_seconds": (r_t1 - r_t0).total_seconds(),
+            "http_status": r_res.http_code,
+            "error": r_res.error,
+            "body": _decode_body(r_res.body),
+        }
+        for idx, r_t0, r_t1, r_res in all_results
+    ]
+    RESPONSE_FILE.write_text(json.dumps(response_entries, indent=2))
+
+    # For multi-request: find the last response time
+    last_t1 = max(r[2] for r in all_results)
 
     status_color = "green" if http_res.http_code == "200" else "red"
     total_wall = (t1 - t0).total_seconds()
     console.print(
-        f"Got HTTP [{status_color}]{http_res.http_code or '—'}[/{status_color}] "
+        f"Primary request: HTTP [{status_color}]{http_res.http_code or '—'}[/{status_color}] "
         f"in {fmt_delta(total_wall).strip()}"
     )
+    if num_requests > 1:
+        ok_count = sum(1 for r in all_results if r[3].http_code == "200")
+        fail_count = len(all_results) - ok_count + len(all_errors)
+        summary_color = "green" if fail_count == 0 else "red"
+        console.print(
+            f"All requests: [{summary_color}]{ok_count}/{num_requests} succeeded[/{summary_color}]"
+            + (f", {len(all_errors)} exception(s)" if all_errors else "")
+        )
 
     console.print("[dim]Collecting authoritative timestamps from kubectl…[/dim]")
     primary_pod_obj = pick_primary_pod(baseline_pods)
@@ -827,16 +1044,73 @@ def main() -> int:
     write_result_json(t0, t1, http_res, primary_pod_tl, other_new_pods, node_tls)
 
     body_preview = ""
-    if RESPONSE_FILE.exists():
-        text = RESPONSE_FILE.read_text(errors="replace")
-        try:
-            body_preview = json.dumps(json.loads(text))[:500]
-        except json.JSONDecodeError:
-            body_preview = text[:500]
+    if response_entries:
+        first_body = response_entries[0].get("body")
+        if isinstance(first_body, str):
+            body_preview = first_body[:500]
+        elif first_body is not None:
+            body_preview = json.dumps(first_body)[:500]
 
     console.print()
-    console.print(Panel(body_preview, title="Response body (truncated)",
-                        border_style="dim", expand=False))
+    console.print(Panel(
+        body_preview,
+        title=f"Response body (request 0 of {len(response_entries)}, truncated)",
+        border_style="dim", expand=False,
+    ))
+
+    # ------- Multi-request summary (grouped by result) -------
+    if num_requests > 1:
+        # Group results by outcome category
+        groups: dict[str, list[float]] = {}
+        for _, r_t0, r_t1, r_res in all_results:
+            wall = (r_t1 - r_t0).total_seconds()
+            has_choices = '"choices"' in (r_res.body or "")
+            if r_res.http_code == "200" and has_choices:
+                key = "200 OK"
+            elif r_res.error:
+                key = f"error: {r_res.error[:60]}"
+            else:
+                key = f"HTTP {r_res.http_code}"
+            groups.setdefault(key, []).append(wall)
+        if all_errors:
+            key = "exception"
+            groups.setdefault(key, [])
+
+        req_tbl = Table(
+            title=f"Request results ({num_requests} concurrent)",
+            title_justify="left", title_style="bold cyan",
+            box=box.SIMPLE_HEAD, show_header=True, header_style="bold",
+            padding=(0, 1), expand=False,
+        )
+        req_tbl.add_column("Result")
+        req_tbl.add_column("Count", justify="right")
+        req_tbl.add_column("Min", justify="right")
+        req_tbl.add_column("Avg", justify="right")
+        req_tbl.add_column("Max", justify="right")
+        for key in sorted(groups, key=lambda k: (-len(groups[k]), k)):
+            times = groups[key]
+            color = "green" if key == "200 OK" else "red"
+            if times:
+                avg = sum(times) / len(times)
+                req_tbl.add_row(
+                    f"[{color}]{key}[/{color}]",
+                    str(len(times)),
+                    fmt_delta(min(times)).strip(),
+                    fmt_delta(avg).strip(),
+                    fmt_delta(max(times)).strip(),
+                )
+            else:
+                # exception group with no timing
+                dash = "—"
+                req_tbl.add_row(
+                    f"[red]{key}[/red]",
+                    str(len(all_errors)),
+                    dash, dash, dash,
+                )
+        console.print(req_tbl)
+        console.print(
+            f"  t0 → last response: {fmt_delta((last_t1 - t0).total_seconds()).strip()}"
+        )
 
     artefacts = Table(title="Artefacts", title_justify="left",
                       title_style="bold cyan", box=box.SIMPLE_HEAD,
@@ -847,7 +1121,11 @@ def main() -> int:
     artefacts.add_row("parsed JSON",   str(RESULT_JSON))
     console.print(artefacts)
 
-    ok = (http_res.http_code == "200") and ('"choices"' in body_preview)
+    # PASS requires ALL requests to succeed
+    all_ok = all(
+        r[3].http_code == "200" and '"choices"' in (r[3].body or "")
+        for r in all_results
+    ) and not all_errors
     gpu_nodes = len(node_tls)
     if gpu_nodes > 1:
         node_info = f" [bold red]({gpu_nodes} GPU nodes provisioned)[/bold red]"
@@ -855,11 +1133,17 @@ def main() -> int:
         node_info = " [bold green](1 GPU node provisioned)[/bold green]"
     else:
         node_info = " [dim](no new GPU node)[/dim]"
-    if ok:
-        console.print(f"[bold green]PASS[/bold green]{node_info}")
+    if all_ok:
+        req_info = f" ({num_requests}/{num_requests} requests OK)" if num_requests > 1 else ""
+        console.print(f"[bold green]PASS[/bold green]{node_info}{req_info}")
     else:
+        ok_count = sum(
+            1 for r in all_results
+            if r[3].http_code == "200" and '"choices"' in (r[3].body or "")
+        )
+        req_info = f" ({ok_count}/{num_requests} requests OK)" if num_requests > 1 else ""
         console.print(
-            f"[bold red]FAIL[/bold red] (http={http_res.http_code}){node_info}"
+            f"[bold red]FAIL[/bold red] (http={http_res.http_code}){node_info}{req_info}"
         )
         # Collect and display diagnostics to help identify the root cause
         diags = collect_diagnostics()
@@ -874,7 +1158,7 @@ def main() -> int:
             for d in diags:
                 dtbl.add_row(d)
             console.print(dtbl)
-    return 0 if ok else 1
+    return 0 if all_ok else 1
 
 
 if __name__ == "__main__":
