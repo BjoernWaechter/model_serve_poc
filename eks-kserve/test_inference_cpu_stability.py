@@ -1,10 +1,12 @@
 #!/usr/bin/env python3
 """Continuously probe the CPU iris InferenceService and report stability runs.
 
-Sends a prediction request every --interval-ms and groups consecutive
-requests with the same outcome (OK vs FAIL) into a "run". Prints one line
-per run only when the outcome flips, so the terminal stays quiet during
-long stable stretches and shouts when behaviour changes.
+Sends a prediction request at an interval that slowly drifts between
+--interval-ms-min and --interval-ms-max to simulate user activity rising
+and falling. Groups consecutive requests with the same outcome (OK vs
+FAIL) into a "run" and prints one line per run only when the outcome
+flips, so the terminal stays quiet during long stable stretches and
+shouts when behaviour changes.
 
 Each line reports the run's wall-clock start/end, duration, number of
 requests, and success rate — green for all-OK runs, red for any-FAIL run.
@@ -15,8 +17,8 @@ Setup (from eks-kserve/):
 
 Usage:
   .venv/bin/python ./test_inference_cpu_stability.py
-  .venv/bin/python ./test_inference_cpu_stability.py --interval-ms 500
-  .venv/bin/python ./test_inference_cpu_stability.py --interval-ms 200 --timeout 5
+  .venv/bin/python ./test_inference_cpu_stability.py --interval-ms-min 50 --interval-ms-max 2000
+  .venv/bin/python ./test_inference_cpu_stability.py --interval-ms-max 5000 --timeout 5
 
 Stop with Ctrl+C — the in-progress run is flushed before exiting.
 """
@@ -25,6 +27,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import random
 import signal
 import subprocess
 import sys
@@ -120,6 +123,40 @@ def live_renderable(run: Run) -> Text:
     return Text.from_markup(_run_markup(run, dt.datetime.now(), live=True))
 
 
+class IntervalDrifter:
+    """Drift the request interval slowly between min and max.
+
+    Picks a random target inside [min, max] and linearly interpolates
+    toward it over a random duration, then picks a new target. The
+    result is a slow, continuous up-and-down pattern rather than
+    independent random draws each tick.
+    """
+
+    # Seconds spent drifting from one target to the next. Wide enough
+    # that activity visibly rises and falls over tens of seconds.
+    _LEG_DURATION_RANGE = (10.0, 60.0)
+
+    def __init__(self, min_ms: float, max_ms: float) -> None:
+        self.min = min_ms / 1000.0
+        self.max = max_ms / 1000.0
+        self._start_value = (self.min + self.max) / 2
+        self._target = random.uniform(self.min, self.max)
+        self._leg_start = time.monotonic()
+        self._leg_duration = random.uniform(*self._LEG_DURATION_RANGE)
+
+    def next(self) -> float:
+        now = time.monotonic()
+        elapsed = now - self._leg_start
+        if elapsed >= self._leg_duration:
+            self._start_value = self._target
+            self._target = random.uniform(self.min, self.max)
+            self._leg_start = now
+            self._leg_duration = random.uniform(*self._LEG_DURATION_RANGE)
+            return self._start_value
+        frac = elapsed / self._leg_duration
+        return self._start_value + (self._target - self._start_value) * frac
+
+
 def probe(session: requests.Session, url: str, timeout: float) -> tuple[bool, str]:
     """Return (ok, reason). reason is empty on success."""
     try:
@@ -142,20 +179,27 @@ def main() -> int:
         description=__doc__,
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
-    ap.add_argument("--interval-ms", type=int, default=100, metavar="MS",
-                    help="delay between requests in milliseconds (default: 100)")
+    ap.add_argument("--interval-ms-min", type=int, default=50, metavar="MS",
+                    help="lower bound of the request interval in milliseconds (default: 50)")
+    ap.add_argument("--interval-ms-max", type=int, default=2000, metavar="MS",
+                    help="upper bound of the request interval in milliseconds (default: 2000)")
     ap.add_argument("--timeout", type=float, default=10.0, metavar="SECONDS",
                     help="per-request HTTP timeout in seconds (default: 10)")
     ap.add_argument("--url", type=str, default=None,
                     help="override terraform-provided iris URL")
     args = ap.parse_args()
 
+    if args.interval_ms_min <= 0 or args.interval_ms_max <= 0:
+        ap.error("--interval-ms-min and --interval-ms-max must be positive")
+    if args.interval_ms_min > args.interval_ms_max:
+        ap.error("--interval-ms-min must be <= --interval-ms-max")
+
     url = args.url or get_terraform_url()
-    interval = args.interval_ms / 1000.0
+    drifter = IntervalDrifter(args.interval_ms_min, args.interval_ms_max)
 
     console.rule("[bold]KServe CPU iris stability probe[/bold]")
     console.print(f"URL:      [cyan]{url}[/cyan]")
-    console.print(f"Interval: {args.interval_ms}ms")
+    console.print(f"Interval: drifting {args.interval_ms_min}–{args.interval_ms_max}ms")
     console.print(f"Timeout:  {args.timeout}s per request")
     console.print("[dim]One line per outcome change. Ctrl+C to stop.[/dim]")
     console.print()
@@ -177,6 +221,7 @@ def main() -> int:
     try:
         while not stopping:
             loop_start = time.monotonic()
+            interval = drifter.next()
             ok, reason = probe(session, url, args.timeout)
             ts = dt.datetime.now()
 
@@ -199,7 +244,7 @@ def main() -> int:
             remaining = interval - (time.monotonic() - loop_start)
             if remaining > 0 and not stopping:
                 # Sleep in short slices so Ctrl+C flushes promptly and the
-                # live duration ticks even when --interval-ms is large.
+                # live duration ticks even when the drifted interval is large.
                 deadline = time.monotonic() + remaining
                 while not stopping and time.monotonic() < deadline:
                     time.sleep(min(0.2, deadline - time.monotonic()))

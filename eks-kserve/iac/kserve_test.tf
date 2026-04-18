@@ -23,6 +23,9 @@ resource "kubectl_manifest" "sklearn_iris_test" {
       name: "iris"
       namespace: kserve-test
     spec:
+      annotations:
+        prometheus.kserve.io/port: "8080"
+        prometheus.kserve.io/path: /metrics
       predictor:
         minReplicas: 2
         maxReplicas: ${var.cpu_node_max}
