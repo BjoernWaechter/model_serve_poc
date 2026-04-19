@@ -1,7 +1,7 @@
 apiVersion: "serving.kserve.io/v1beta1"
 kind: "InferenceService"
 metadata:
-  name: "iris"
+  name: "forest"
   namespace: team-a
 spec:
   predictor:
