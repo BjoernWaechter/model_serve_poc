@@ -12,3 +12,7 @@ mlflow/**
 *.tfvars
 !*.tfvars.example
 .terraform.tfstate.lock.info
+
+.env
+!.env.example
+.ipynb_checkpoints/
