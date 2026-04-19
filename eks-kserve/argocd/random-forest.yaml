@@ -14,7 +14,7 @@ spec:
     model:
       modelFormat:
         name: sklearn
-      storageUri: "s3://kserve-cluster-model-artifacts-768871556035/2/6ac8aa57bbf746cb988382bc1962015e/artifacts/sklearn-model"
+      storageUri: "s3://kserve-cluster-model-artifacts-768871556035/2/models/m-d3db6d24cd6348f483c258c53e9dd3a3/artifacts/model.pkl"
       resources:
         requests:
           cpu: "100m"
