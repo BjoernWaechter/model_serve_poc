@@ -9,7 +9,7 @@ spec:
     annotations:
       prometheus.kserve.io/port: "8080"
       prometheus.kserve.io/path: /metrics
-    minReplicas: 1
+    minReplicas: 2
     maxReplicas: 5
     model:
       modelFormat:
