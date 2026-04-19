@@ -9,12 +9,12 @@ spec:
     annotations:
       prometheus.kserve.io/port: "8080"
       prometheus.kserve.io/path: /metrics
-    minReplicas: 1
+    minReplicas: 2
     maxReplicas: 5
     model:
       modelFormat:
         name: sklearn
-      storageUri: "s3://kserve-cluster-model-artifacts-768871556035/2/models/m-efb381d4f4704e6fa66bf50704b2d57e/artifacts"
+      storageUri: "<model-storage-uri>"
       resources:
         requests:
           cpu: "100m"
