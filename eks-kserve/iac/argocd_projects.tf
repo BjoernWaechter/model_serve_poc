@@ -19,6 +19,14 @@ locals {
   argocd_project_teams = var.install_argocd ? {
     for name, cfg in var.teams : name => cfg if length(cfg.source_repos) > 0
   } : {}
+
+  # Teams that get an ArgoCD Application auto-synced from git.
+  # Keyed by team (namespace) name; value is the path inside the team's
+  # first source_repo. Add an entry here once a team has manifests to sync.
+  # Each team's future private repo will slot in by pointing at its root.
+  argocd_application_teams = var.install_argocd ? {
+    team-a = { path = "eks-kserve/argocd" }
+  } : {}
 }
 
 resource "kubectl_manifest" "team_appproject" {
@@ -77,5 +85,57 @@ resource "kubectl_manifest" "team_appproject" {
   depends_on = [
     helm_release.argocd,
     kubernetes_namespace.team,
+  ]
+}
+
+# Per-team Application. spec.project pins it to the team's AppProject so the
+# AppProject's destination + resource whitelists apply. automated+selfHeal make
+# git the source of truth; prune removes resources once they leave git.
+resource "kubectl_manifest" "team_application" {
+  for_each = local.argocd_application_teams
+
+  yaml_body = yamlencode({
+    apiVersion = "argoproj.io/v1alpha1"
+    kind       = "Application"
+    metadata = {
+      name      = each.key
+      namespace = kubernetes_namespace.argocd[0].metadata[0].name
+      labels = {
+        "app.kubernetes.io/managed-by" = "terraform"
+        "team"                         = each.key
+      }
+    }
+    spec = {
+      project = each.key
+
+      source = {
+        repoURL        = var.teams[each.key].source_repos[0]
+        path           = each.value.path
+        targetRevision = "HEAD"
+        directory = {
+          recurse = true
+        }
+      }
+
+      destination = {
+        server    = "https://kubernetes.default.svc"
+        namespace = kubernetes_namespace.team[each.key].metadata[0].name
+      }
+
+      syncPolicy = {
+        automated = {
+          prune    = true
+          selfHeal = true
+        }
+        # Namespace is owned by terraform — don't let ArgoCD recreate it.
+        syncOptions = [
+          "CreateNamespace=false",
+        ]
+      }
+    }
+  })
+
+  depends_on = [
+    kubectl_manifest.team_appproject,
   ]
 }

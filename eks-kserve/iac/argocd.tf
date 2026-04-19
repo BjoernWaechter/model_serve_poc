@@ -52,12 +52,22 @@ resource "helm_release" "argocd" {
       configs = {
         params = {
           "server.insecure" = true
+          # Repo-server HEAD→SHA lookup TTL. Default 3m, which caused freshly
+          # pushed commits to take up to 3m to be detected. Match the soft
+          # resync tick so a push propagates within ~60s worst case.
+          "reposerver.revision.cache.expiration" = "60s"
         }
-        # Poll tracked git repos every 60s instead of the 180s default — fine
-        # for a small cluster with one repo; lower than this risks GitHub's
-        # secondary rate limits when running unauthenticated.
         cm = {
+          # Soft resync — compares cluster against repo-server's manifest cache.
+          # Poll tracked git repos every 60s instead of the 180s default — fine
+          # for a small cluster with one repo; lower than this risks GitHub's
+          # secondary rate limits when running unauthenticated.
           "timeout.reconciliation" = "60s"
+          # Hard resync — bypasses the repo-server manifest cache and re-queues
+          # the app. Disabled by default (0s). Setting it guards against a bug
+          # we've observed where the soft-resync timer silently stops firing;
+          # the hard-resync timer then kicks the work queue back to life.
+          "timeout.hard.reconciliation" = "180s"
         }
       }
 
