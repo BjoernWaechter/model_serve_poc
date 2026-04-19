@@ -73,6 +73,23 @@ resource "kubernetes_limit_range" "team" {
   depends_on = [kubernetes_namespace.team]
 }
 
+# Service account that the team's InferenceService predictors run under.
+# Annotated with the model-serving IAM role so the storage-initializer
+# sidecar can pull model artifacts from S3 via IRSA.
+resource "kubernetes_service_account" "team_kserve_sa" {
+  for_each = var.teams
+
+  metadata {
+    name      = "kserve-sa"
+    namespace = each.key
+    annotations = {
+      "eks.amazonaws.com/role-arn" = module.model_serving_irsa.iam_role_arn
+    }
+  }
+
+  depends_on = [kubernetes_namespace.team]
+}
+
 # Network policy — deny all cross-namespace traffic
 resource "kubernetes_network_policy" "team_isolation" {
   for_each = var.teams

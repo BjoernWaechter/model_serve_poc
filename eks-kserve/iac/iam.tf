@@ -75,6 +75,9 @@ module "aws_lb_controller_irsa" {
 }
 
 # KServe model serving role
+# Trusted by the KServe controller and by a `kserve-sa` service account in each
+# team namespace — the storage-initializer sidecar runs under the predictor
+# pod's SA, so team SAs need S3 read on the model bucket.
 module "model_serving_irsa" {
   source  = "terraform-aws-modules/iam/aws//modules/iam-role-for-service-accounts-eks"
   version = "~> 5.0"
@@ -87,8 +90,11 @@ module "model_serving_irsa" {
 
   oidc_providers = {
     main = {
-      provider_arn               = module.eks.oidc_provider_arn
-      namespace_service_accounts = ["kserve:kserve-controller-manager"]
+      provider_arn = module.eks.oidc_provider_arn
+      namespace_service_accounts = concat(
+        ["kserve:kserve-controller-manager"],
+        [for team in keys(var.teams) : "${team}:kserve-sa"],
+      )
     }
   }
 }
