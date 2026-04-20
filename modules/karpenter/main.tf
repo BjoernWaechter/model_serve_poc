@@ -46,13 +46,6 @@ resource "helm_release" "karpenter_crd" {
   namespace        = "karpenter"
   create_namespace = true
 
-  # ECR Public tokens rotate every 12 hours, so the token embedded here
-  # changes on every refresh and would mark the release dirty on every plan.
-  # The chart is pulled once at install time; later rotations don't affect
-  # the running release.
-  lifecycle {
-    ignore_changes = [repository_password, repository_username]
-  }
 }
 
 resource "helm_release" "karpenter" {
@@ -65,9 +58,6 @@ resource "helm_release" "karpenter" {
   namespace        = "karpenter"
   timeout          = 300
   wait             = true
-
-  repository_username = data.aws_ecrpublic_authorization_token.token.user_name
-  repository_password = data.aws_ecrpublic_authorization_token.token.password
 
   values = [
     yamlencode({
